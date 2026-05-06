@@ -63,7 +63,7 @@ export class GatewayManager {
     this.onStatusChange = listener;
   }
 
-  /** broker 启动后在 gateway 起之前注入 endpoint */
+  /** Inject the broker endpoint after broker.start() and before gateway start. */
   setBrokerEndpoint(endpoint: { url: string; port: number }): void {
     this.brokerEndpoint = endpoint;
   }
@@ -73,11 +73,14 @@ export class GatewayManager {
   }
 
   /**
-   * 解析 bundled 社区插件的绝对入口路径。
+   * Resolve absolute entry paths for the bundled community plugins.
    *
-   * 3 个国内渠道插件(微信 / 企微 / 钉钉)作为 npm dep 直接装在 node_modules,
-   * 读每个包的 package.json.openclaw.extensions 数组拼成绝对路径,
-   * 写到 config.plugins.load.paths 让 OpenClaw 发现。asar 打包时走 unpacked。
+   * Three Chinese-channel plugins (WeChat / WeCom / DingTalk) are
+   * installed as ordinary npm deps under node_modules. We read each
+   * package's `package.json.openclaw.extensions` array and assemble
+   * absolute paths, then write them to `config.plugins.load.paths` so
+   * OpenClaw can discover them. In asar builds we resolve to the
+   * unpacked tree.
    */
   private resolveBundledPluginPaths(): string[] {
     const req = createRequire(path.join(__dirname, "package.json"));
@@ -89,9 +92,13 @@ export class GatewayManager {
     const paths: string[] = [];
     for (const pkg of packages) {
       try {
-        // 有些包 exports 既不暴露 ./package.json 也是 ESM-only(require.resolve 失败),
-        // 所以依次尝试:(1) resolve package.json (2) resolve main (3) 直接拼
-        // node_modules/<pkg> 路径。只要找到一个存在的目录就够。
+        // Some packages neither expose `./package.json` nor are
+        // CommonJS-resolvable (require.resolve fails on ESM-only ones),
+        // so we try in order:
+        //   (1) resolve `<pkg>/package.json`
+        //   (2) resolve the main entry and walk up to the package root
+        //   (3) fall back to assembling node_modules/<pkg> directly.
+        // Any of those that yields an existing directory wins.
         let pkgRoot: string | null = null;
         try {
           const seed = req.resolve(`${pkg}/package.json`);
@@ -108,12 +115,14 @@ export class GatewayManager {
             }
             if (fs.existsSync(path.join(cur, "package.json"))) pkgRoot = cur;
           } catch {
-            // require.resolve 全挂,走文件系统路径
+            // require.resolve failed entirely — fall through to the filesystem path.
           }
         }
         if (!pkgRoot) {
-          // 直接拼 node_modules/<pkg> 作为最后一根稻草。__dirname 在 dev = dist-electron/,
-          // 在 prod = resources/app.asar.unpacked 或 app.asar,都能往上两级到工程根。
+          // Last resort: hard-code node_modules/<pkg>. In dev __dirname
+          // is `dist-electron/`; in prod it's
+          // `resources/app.asar.unpacked` or `app.asar`. In all cases
+          // going up two levels lands at the project root.
           const candidates = [
             path.resolve(__dirname, "..", "node_modules", pkg),
             path.resolve(__dirname, "..", "..", "node_modules", pkg),
@@ -133,10 +142,12 @@ export class GatewayManager {
           );
           continue;
         }
-        // 注册的是"包根目录"——OpenClaw 会扫 openclaw.plugin.json 拿到
-        // extensions 数组,再按相对路径加载。不能直接注册 extension 文件:
-        // 有的包入口在 dist/ 子目录,而 manifest 永远在包根,OpenClaw 按
-        // 入口文件同目录找 manifest 会找不到。
+        // We register the *package root*, not the extension entry file.
+        // OpenClaw scans `openclaw.plugin.json` from the root and walks
+        // `extensions` from there. Some packages have their entry under
+        // `dist/`, while the manifest is always at the root — registering
+        // the entry directly would make OpenClaw look for the manifest
+        // in the wrong directory.
         let registerPath = pkgRoot;
         if (
           registerPath.includes("app.asar" + path.sep) ||
@@ -159,21 +170,24 @@ export class GatewayManager {
   }
 
   /**
-   * 解析内置 openclaw CLI 入口路径。
+   * Resolve the entry path for the bundled OpenClaw CLI.
    *
-   * openclaw.mjs 在包根目录，而 exports 指向 dist/index.js。
-   * 所以先 resolve 到包的 main entry，再回到包根目录找 openclaw.mjs。
+   * `openclaw.mjs` lives at the package root, but the package's main
+   * `exports` points to `dist/index.js`. So we resolve the main entry
+   * first, then walk back up to the package root to find `openclaw.mjs`.
    */
   private resolveClawEntry(): string {
     const require = createRequire(path.join(__dirname, "package.json"));
     const pkgMain = require.resolve("openclaw");
-    // pkgMain = .../openclaw/dist/index.js → 包根 = ../
+    // pkgMain = .../openclaw/dist/index.js → package root = ../
     const pkgRoot = path.resolve(path.dirname(pkgMain), "..");
     let entry = path.join(pkgRoot, "openclaw.mjs");
 
-    // 打包后 asar 内路径需要使用 unpacked 版本（子进程无 asar 支持）
-    // Electron 的 asar patch 会让 fs.existsSync 对 asar 路径返回 true，
-    // 所以需要替换为 unpacked 路径，子进程才能真正读取文件
+    // After packaging, paths inside the asar need to use the unpacked
+    // copy because subprocesses don't have Electron's asar runtime.
+    // Electron's asar patch makes `fs.existsSync` return true for asar
+    // paths, so we must rewrite to the unpacked path explicitly — only
+    // then can a child process actually read the file.
     if (entry.includes("app.asar" + path.sep) || entry.includes("app.asar/")) {
       entry = entry.replace(/app\.asar(?=[\\/])/, "app.asar.unpacked");
     }
@@ -188,16 +202,17 @@ export class GatewayManager {
   }
 
   /**
-   * 获取 Node.js 运行二进制路径。
+   * Resolve the Node.js binary used to spawn child processes.
    *
-   * 打包后的 macOS 环境使用 Electron Helper 二进制，
-   * 配合 ELECTRON_RUN_AS_NODE=1 作为 Node.js 运行 Gateway。
-   * Helper 不会在 Dock 产生额外图标（与主二进制不同）。
+   * On packaged macOS we use the Electron Helper binary together with
+   * `ELECTRON_RUN_AS_NODE=1` to run the Gateway in Node mode. Unlike the
+   * main Electron binary, the Helper doesn't produce a second Dock icon.
    */
   /**
-   * 跑一条 openclaw CLI 命令(非 gateway),流式回调 stdout/stderr。
-   * 跟 Gateway 共享同一套 entry / node bin / 环境清理逻辑。
-   * 返回值是可用来杀进程的函数。
+   * Run a single openclaw CLI command (not the gateway) and stream
+   * stdout / stderr through the supplied callbacks. Shares the same
+   * entry / node bin / env-sanitization logic as the Gateway.
+   * Returns a cancellation function the caller can use to kill the child.
    */
   runClawCommand(
     args: string[],
@@ -269,16 +284,19 @@ export class GatewayManager {
   }
 
   /**
-   * 确保 host 级别的 exec approvals 文件 defaults 为宽松策略。
+   * Make sure the host-level exec-approvals file has lenient defaults.
    *
-   * OpenClaw 硬编码从 ~/.openclaw/exec-approvals.json 读宿主审批状态
-   * (不跟随 OPENCLAW_STATE_DIR),全机器级别的 gate。mhclaw 作为单用户
-   * 桌面应用,默认不弹审批——等同 `openclaw exec-policy preset yolo` 的
-   * 本地部分。
+   * OpenClaw hard-codes the path `~/.openclaw/exec-approvals.json` for
+   * the host-level approval state — it does NOT follow
+   * OPENCLAW_STATE_DIR, so it's a machine-wide gate. mhclaw is a
+   * single-user desktop app: by default we don't want a permission
+   * prompt for every command. This is the local equivalent of
+   * `openclaw exec-policy preset yolo`.
    *
-   * 合并策略:保留已有 agents/socket/version 等字段(用户批过的 allowlist
-   * 不动),只确保 defaults 里有 ask:"off" + security:"full"。已有更宽松
-   * 或等价配置就不写。
+   * Merge strategy: preserve any existing `agents` / `socket` / `version`
+   * fields (the user's curated allowlist stays put). Only ensure that
+   * `defaults` contains `ask: "off"` + `security: "full"`. If the
+   * existing config is already as lenient or more so, we leave it alone.
    */
   private ensureHostApprovalsFile() {
     try {
@@ -330,13 +348,15 @@ export class GatewayManager {
     if (!fs.existsSync(logDir)) {
       fs.mkdirSync(logDir, { recursive: true });
     }
-    // claw agent 专属 workspace(channel 消息的 session 落在这,和桌面 UI 的 workspace 隔离)
+    // Dedicated workspace for the `claw` agent (channel-message sessions
+    // land here, kept isolated from the desktop UI's workspace).
     const clawDir = path.join(this.stateDir, "claw");
     if (!fs.existsSync(clawDir)) {
       fs.mkdirSync(clawDir, { recursive: true });
     }
 
-    // 一次性迁移:旧 openclaw.json → mhclaw.json(品牌一致性改名,内容不变)
+    // One-shot migration: rename a legacy `openclaw.json` to `mhclaw.json`
+    // (branding consistency only; the file contents are preserved).
     const legacyPath = path.join(this.stateDir, "openclaw.json");
     if (fs.existsSync(legacyPath) && !fs.existsSync(this.configPath)) {
       try {
@@ -347,7 +367,7 @@ export class GatewayManager {
       }
     }
 
-    // 确保有最小配置文件,否则 Gateway 拒绝启动
+    // Make sure a minimal config file exists, otherwise Gateway refuses to start.
     const configPath = this.configPath;
     if (!fs.existsSync(configPath)) {
       const workspacePath = path.join(this.stateDir, "workspace");
@@ -364,19 +384,27 @@ export class GatewayManager {
           defaults: {
             workspace: workspacePath,
           },
-          // 两个 agent 隔离:
-          //  - main  → 桌面 UI 的任务 session,sessionKey = agent:main:session-<ts>
-          //  - claw  → 所有 channel(微信/企微/钉钉)的入站消息,sessionKey = agent:claw:main
-          //           workspace / memory 独立,避免 chat history 和文件串
+          // Two-agent split:
+          //   - main → desktop-UI task sessions; sessionKey =
+          //            `agent:main:session-<ts>`.
+          //   - claw → inbound messages from any channel
+          //            (WeChat / WeCom / DingTalk); sessionKey =
+          //            `agent:claw:main`.
+          // Each gets its own workspace + memory so chat history and
+          // task files never cross-contaminate.
           list: [
             { id: "main", default: true, workspace: workspacePath },
             { id: "claw", workspace: clawWorkspacePath },
           ],
         },
-        // 顶层 bindings(不是 agents.bindings)按 channel 路由到 claw agent
+        // Top-level `bindings` (NOT `agents.bindings`) route each channel
+        // onto the claw agent.
         bindings: [
-          // accountId: "*" 是关键 — 不设会被 OpenClaw normalize 成空串,落不到任何匹配 tier。
-          // "*" 表示该 channel 下所有账号都路由到 claw agent(见 resolve-route 的 byChannel bucket)。
+          // `accountId: "*"` is critical: leaving it unset gets
+          // normalized to an empty string by OpenClaw, which then falls
+          // off every match tier. `"*"` routes ALL accounts under that
+          // channel to the claw agent (see resolve-route's byChannel
+          // bucket).
           { agentId: "claw", match: { channel: "openclaw-weixin", accountId: "*" } },
           { agentId: "claw", match: { channel: "wecom", accountId: "*" } },
           { agentId: "claw", match: { channel: "ddingtalk", accountId: "*" } },
@@ -390,17 +418,22 @@ export class GatewayManager {
         },
         browser: {
           enabled: true,
-          // 劫持 user key:OpenClaw 会强塞 user=existing-session(attach 用户日常 Chrome)。
-          // 我们显式配 user,OpenClaw 跳过默认注入,driver 回退到 "openclaw" → 自启独立 Chrome。
+          // Hijack the `user` key: OpenClaw otherwise hard-codes
+          // `user = existing-session` and would attach to the user's
+          // everyday Chrome. By setting `user` explicitly, OpenClaw
+          // skips the default injection, the driver falls back to
+          // "openclaw", and we launch an independent Chrome instance.
           defaultProfile: "user",
           profiles: {
             user: { cdpPort: 18800, color: "#E8683A" },
           },
           ssrfPolicy: { dangerouslyAllowPrivateNetwork: true },
         },
-        // MCP: 只暴露 mhclaw 自管的 broker, OpenClaw 看不到用户原 server.
-        // 用户配置存在 ~/.mhclaw/mcp-registry.json, broker 内部 fan-out。
-        // brokerEndpoint 还没设时跳过 mcp 段 (broker 启动失败的 fallback)。
+        // MCP: only expose the mhclaw-managed broker — OpenClaw never
+        // sees the user's individual MCP servers. The actual user
+        // config lives at ~/.mhclaw/mcp-registry.json and the broker
+        // fans out internally. If `brokerEndpoint` isn't set yet
+        // (broker startup failed), we skip the mcp block as a fallback.
         ...(this.brokerEndpoint
           ? {
               mcp: {
@@ -417,7 +450,7 @@ export class GatewayManager {
       fs.writeFileSync(configPath, JSON.stringify(minimalConfig, null, 2));
       console.log(`[GatewayManager] Created minimal config at ${configPath}`);
     } else {
-      // 确保已有配置包含必要的 mhclaw 设置
+      // Ensure the existing config contains the mhclaw-required settings.
       try {
         const raw = fs.readFileSync(configPath, "utf-8");
         const config = JSON.parse(raw);
@@ -431,7 +464,7 @@ export class GatewayManager {
           changed = true;
         }
 
-        // workspace 路径指向 ~/.mhclaw/workspace
+        // Point workspace at ~/.mhclaw/workspace.
         const workspacePath = path.join(this.stateDir, "workspace");
         const clawWorkspacePath = path.join(this.stateDir, "claw");
         if (!config.agents) config.agents = {};
@@ -441,9 +474,11 @@ export class GatewayManager {
           changed = true;
         }
 
-        // agents.list:保证 main + claw 两个 agent 都在,workspace 正确
-        //  - main default=true → 桌面 UI 的 session-<ts> 用
-        //  - claw            → channel 入站消息专属,独立 workspace / memory
+        // agents.list: guarantee both `main` and `claw` agents exist
+        // with the correct workspaces.
+        //   - main (default=true) → desktop-UI session-<ts> tasks.
+        //   - claw                 → channel inbound messages, isolated
+        //                            workspace / memory.
         const desiredAgentList = [
           { id: "main", default: true, workspace: workspacePath },
           { id: "claw", workspace: clawWorkspacePath },
@@ -451,7 +486,8 @@ export class GatewayManager {
         const currentList = Array.isArray(config.agents.list)
           ? config.agents.list
           : [];
-        // 用 id 合并:desired 覆盖 current 里同 id 的项,保留其他自定义 agent
+        // Merge by id: our desired entries override any same-id entries
+        // in `current`; any other custom agents are preserved as-is.
         const byId = new Map<string, Record<string, unknown>>();
         for (const a of currentList) {
           if (a && typeof a === "object" && typeof a.id === "string") {
@@ -467,10 +503,13 @@ export class GatewayManager {
           changed = true;
         }
 
-        // bindings:所有已 bundled 的 channel 都路由到 claw agent
+        // bindings: route every bundled channel onto the claw agent.
         const desiredBindings = [
-          // accountId: "*" 是关键 — 不设会被 OpenClaw normalize 成空串,落不到任何匹配 tier。
-          // "*" 表示该 channel 下所有账号都路由到 claw agent(见 resolve-route 的 byChannel bucket)。
+          // `accountId: "*"` is critical: leaving it unset gets
+          // normalized to an empty string by OpenClaw, which then falls
+          // off every match tier. `"*"` routes ALL accounts under that
+          // channel to the claw agent (see resolve-route's byChannel
+          // bucket).
           { agentId: "claw", match: { channel: "openclaw-weixin", accountId: "*" } },
           { agentId: "claw", match: { channel: "wecom", accountId: "*" } },
           { agentId: "claw", match: { channel: "ddingtalk", accountId: "*" } },
@@ -478,7 +517,8 @@ export class GatewayManager {
         const currentBindings = Array.isArray(config.bindings)
           ? config.bindings
           : [];
-        // 同 channel 去重:我们的 desired 优先,保留用户其他 bindings
+        // Same-channel dedup: our `desired` wins; any user-defined
+        // bindings on other channels are preserved.
         const bindingKeyOf = (b: Record<string, unknown>): string => {
           const m = (b?.match ?? {}) as Record<string, unknown>;
           return `${b?.agentId ?? ""}|${m?.channel ?? ""}|${m?.accountId ?? ""}`;
@@ -498,7 +538,7 @@ export class GatewayManager {
           changed = true;
         }
 
-        // 禁用 memory-core 插件 slot（打包后不包含该插件）
+        // Disable the memory-core plugin slot (packaged builds don't include it).
         if (!config.plugins) config.plugins = {};
         if (!config.plugins.slots) config.plugins.slots = {};
         if (config.plugins.slots.memory !== "") {
@@ -506,8 +546,11 @@ export class GatewayManager {
           changed = true;
         }
 
-        // mhclaw 默认宽松执行策略:用户就是自己,不做 YC/生产多租户隔离。
-        // AI 帮你开浏览器 / 跑命令不应该每次弹审批。效果等同 `openclaw exec-policy preset yolo`。
+        // Default to a permissive exec policy in mhclaw: the user IS the
+        // tenant, no YC/production multi-tenant isolation needed. The
+        // AI shouldn't pop an approval prompt every time it opens a
+        // browser or runs a shell command. Equivalent to
+        // `openclaw exec-policy preset yolo` for the local part.
         if (!config.tools) config.tools = {};
         if (!config.tools.exec) config.tools.exec = {};
         const execDesired = { host: "gateway", security: "full", ask: "off" };
@@ -518,14 +561,20 @@ export class GatewayManager {
           }
         }
 
-        // 浏览器策略:
-        //  1. 劫持 user key。OpenClaw resolveBrowserConfig 会硬编码注入
-        //     user={driver:"existing-session", attachOnly:true},走 chrome-devtools-mcp
-        //     attach 用户日常 Chrome —— 这正是 "操控我的浏览器" bug 的根因。
-        //     我们显式在 profiles 里配好 user,OpenClaw 看到 result.user 存在就跳过
-        //     默认注入,driver 回退到 "openclaw" → 走 launchOpenClawChrome 自启独立
+        // Browser policy:
+        //   1. Hijack the `user` key. OpenClaw's resolveBrowserConfig
+        //      otherwise hard-injects
+        //      `user = {driver: "existing-session", attachOnly: true}`,
+        //      routing through chrome-devtools-mcp to attach to the
+        //      user's everyday Chrome — this is exactly the root cause
+        //      of the "AI takes over my browser" bug. By providing a
+        //      `user` profile explicitly, OpenClaw sees `result.user`
+        //      already exists, skips the default injection, the driver
+        //      falls back to "openclaw", and `launchOpenClawChrome`
+        //      starts an isolated Chrome instance.
         //     Chrome,user-data-dir = ~/.openclaw/profile-user/。
-        //  2. SSRF 放开私网(CDP 127.0.0.1 loopback 握手 + hostname 导航)。
+        //   2. Relax the SSRF policy to allow private networks (CDP
+        //      127.0.0.1 loopback handshakes + hostname navigation).
         if (!config.browser) config.browser = {};
         if (config.browser.enabled !== true) {
           config.browser.enabled = true;
@@ -551,13 +600,15 @@ export class GatewayManager {
           changed = true;
         }
 
-        // Bundled 社区插件(微信 / 企微 / 钉钉):把绝对路径注入 plugins.load.paths
+        // Bundled community plugins (WeChat / WeCom / DingTalk):
+        // inject their absolute paths into plugins.load.paths.
         if (!config.plugins.load) config.plugins.load = {};
         const bundled = this.resolveBundledPluginPaths();
         const existing: string[] = Array.isArray(config.plugins.load.paths)
           ? config.plugins.load.paths
           : [];
-        // 保留非 node_modules 的用户自定义路径,只同步 bundled 部分
+        // Preserve any user-defined paths that aren't under node_modules;
+        // only sync the bundled-plugin portion.
         const nonBundled = existing.filter((p) => !/node_modules/.test(p));
         const merged = [...nonBundled, ...bundled];
         if (JSON.stringify(merged) !== JSON.stringify(existing)) {
@@ -565,19 +616,23 @@ export class GatewayManager {
           changed = true;
         }
 
-        // 清理 5.x 已 retired 的 legacy key(从 4.x 升级过来时会撞 schema 拒绝):
-        //   agents.defaults.llm  (changelog #76798/#76800; doctor --fix 也清这个)
-        // 这条不会自动重新添加, 类似 ad-hoc migration。
+        // Clean up legacy keys retired in 5.x (carrying these over from
+        // a 4.x upgrade would trigger a schema rejection):
+        //   agents.defaults.llm — see changelog #76798/#76800;
+        //   `doctor --fix` removes the same key.
+        // This is an ad-hoc one-off migration; the key won't be re-added.
         if (config.agents?.defaults?.llm !== undefined) {
           delete config.agents.defaults.llm;
           changed = true;
           console.log(`[GatewayManager] Removed retired key agents.defaults.llm`);
         }
 
-        // MCP: 改写为只含 mhclaw-mcp-broker 一条。用户原 mcp.servers 已经在
-        // main.ts 启动期被 readLegacyMcpServers + mcpRegistry.init 一次性 migrate
-        // 到 ~/.mhclaw/mcp-registry.json, 这里直接覆盖。
-        // brokerEndpoint 没设(broker 启动失败的 fallback) → 不动 mcp.servers。
+        // MCP: rewrite the section so it only contains the single
+        // `mhclaw-mcp-broker` entry. Any user-supplied `mcp.servers` was
+        // already migrated to ~/.mhclaw/mcp-registry.json during
+        // `main.ts` startup (readLegacyMcpServers + mcpRegistry.init),
+        // so we can safely overwrite it here.
+        // brokerEndpoint not set (broker startup failed) → don't touch mcp.servers.
         if (this.brokerEndpoint) {
           const desiredMcp = {
             servers: {
@@ -621,8 +676,8 @@ export class GatewayManager {
     const logPath = path.join(this.stateDir, "logs", "gateway.log");
     const logStream = fs.createWriteStream(logPath, { flags: "a" });
 
-    // 清理 Electron 污染的环境变量，避免子进程（brew/npm/go 等）
-    // 加载到 Electron 内置的 ICU 等动态库导致崩溃
+    // Strip env vars Electron pollutes — otherwise subprocesses
+    // (brew/npm/go and friends) load Electron's bundled ICU and crash.
     const cleanEnv = { ...process.env };
     delete cleanEnv.DYLD_LIBRARY_PATH;
     delete cleanEnv.DYLD_FALLBACK_LIBRARY_PATH;
@@ -633,19 +688,25 @@ export class GatewayManager {
     const env: NodeJS.ProcessEnv = {
       ...cleanEnv,
       OPENCLAW_STATE_DIR: this.stateDir,
-      OPENCLAW_CONFIG_PATH: this.configPath, // 告诉 OpenClaw 读 mhclaw.json 而非默认 openclaw.json
+      OPENCLAW_CONFIG_PATH: this.configPath, // tell OpenClaw to read mhclaw.json instead of the default openclaw.json
       OPENCLAW_GATEWAY_PORT: String(this.port),
-      // Plugin discovery 缓存 TTL,默认只有 1000ms —— 启动过程中会被调用 N 次,
-      // 每次 TTL 过期都全量 rescan node_modules(62000+ fs.statSync),Windows 慢机
-      // 累积成 87 秒阻塞(对应 OpenClaw issue #67869)。拉到 1 小时后只冷扫一次,
-      // 后续全命中 in-memory 缓存。mhclaw 打包后 bundled skill 不会动态变,
-      // 长缓存完全安全。
+      // Plugin discovery cache TTL defaults to just 1000ms. Startup
+      // calls into discovery dozens of times; every TTL expiry triggers
+      // a full rescan of node_modules (62000+ fs.statSync calls), which
+      // on slow Windows machines cumulatively blocks for ~87s (see
+      // OpenClaw issue #67869). Bumping to 1 hour means a single cold
+      // scan up front, then in-memory cache hits forever after. Bundled
+      // skills don't change at runtime in a packaged mhclaw build, so
+      // a long TTL is perfectly safe.
       OPENCLAW_PLUGIN_DISCOVERY_CACHE_MS: "3600000",
-      // 禁用 Bonjour/mDNS 局域网广播。这是 OpenClaw 用来让同 WiFi 下其他设备
-      // (手机 app)扫描发现 Gateway 的,用于 device-pair 功能。mhclaw 是桌面
-      // 工作台,客户端直连 127.0.0.1:40789,完全不需要 mDNS 发现。
-      // Windows 上 mDNS 广播常被防火墙干扰,实测 stuck 56 秒(日志里 "bonjour
-      // restarting advertiser"),禁掉直接省这个延迟,零副作用。
+      // Disable Bonjour/mDNS LAN broadcasting. OpenClaw uses it to let
+      // other devices on the same WiFi (mobile apps) discover the
+      // Gateway for device-pairing. mhclaw is a desktop workbench whose
+      // client connects directly to 127.0.0.1:40789 — mDNS discovery
+      // serves no purpose. On Windows, mDNS broadcasting often gets
+      // throttled by the firewall (we've measured 56s stalls with log
+      // lines like "bonjour restarting advertiser"); disabling it
+      // saves that latency with zero downside.
       OPENCLAW_DISABLE_BONJOUR: "1",
       ELECTRON_RUN_AS_NODE: "1",
     };
@@ -671,9 +732,11 @@ export class GatewayManager {
       console.log(`[GatewayManager] Gateway started (pid: ${this.process?.pid})`);
       this.emitStatus({ state: "running", port: this.port, pid: this.process?.pid });
 
-      // Gateway 启动后它会自己在 mhclaw.json 写入 auth.token(可能延迟几十秒,
-      // 尤其 Windows 慢机+杀毒扫描)。监听 config 文件,token 一出现就再推一次
-      // 状态事件,渲染进程能跟进重连,不依赖纯轮询。
+      // After startup the Gateway writes auth.token into mhclaw.json on
+      // its own (possibly tens of seconds later, especially on slow
+      // Windows machines under AV scanning). We watch the config file
+      // and re-emit a status event the moment the token appears, so the
+      // renderer can reconnect immediately without resorting to polling.
       this.watchForAuthToken();
     });
 
@@ -689,7 +752,7 @@ export class GatewayManager {
       this.restartCount++;
       if (this.restartCount > this.maxRestarts) {
         console.error("[GatewayManager] Max restarts reached, giving up");
-        this.emitStatus({ state: "error", error: "超过最大重启次数" });
+        this.emitStatus({ state: "error", error: "Max restart attempts exceeded" });
         return;
       }
 
@@ -751,7 +814,7 @@ export class GatewayManager {
     return this.process?.pid;
   }
 
-  /** 从配置文件读取 auth token(Gateway 启动后会自动生成) */
+  /** Read the auth token from the config file (Gateway generates it on startup). */
   getAuthToken(): string | null {
     try {
       const raw = fs.readFileSync(this.configPath, "utf-8");
@@ -763,8 +826,10 @@ export class GatewayManager {
   }
 
   /**
-   * 监听 config 文件,等 Gateway 写入 gateway.auth.token 后再推一次状态事件。
-   * 最长 5 分钟后停止(正常 2 分钟内一定能拿到,拿不到说明 Gateway 挂了)。
+   * Watch the config file. Once the Gateway writes
+   * `gateway.auth.token`, re-emit a status event so consumers can
+   * proceed. Times out after 5 minutes — token normally appears in
+   * under 2 minutes; missing it that long means the Gateway is wedged.
    */
   private watchForAuthToken() {
     let lastSeen: string | null = this.getAuthToken();
@@ -774,8 +839,8 @@ export class GatewayManager {
     }
     const started = Date.now();
     const poll = () => {
-      if (!this.process) return; // 已停
-      if (Date.now() - started > 5 * 60_000) return; // 超时放弃
+      if (!this.process) return; // already stopped
+      if (Date.now() - started > 5 * 60_000) return; // timed out — give up
       const token = this.getAuthToken();
       if (token && token !== lastSeen) {
         lastSeen = token;

@@ -87,24 +87,30 @@ import { setupMainLogger } from "./services/logger.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// macOS 菜单栏和 Cmd+Tab 显示的应用名
+// App name shown in the macOS menu bar and Cmd+Tab.
 app.setName(APP_NAME);
 
-// 主进程文件日志 —— packaged 模式 console 直接丢,所有 console.{log,warn,error}
-// 也写到 ~/.mhclaw/logs/mhclaw_main.log,出问题时让用户"发一下日志给我"快速排查
+// File-based logger for the main process. Packaged builds drop console
+// output, so we mirror every console.{log,warn,error} into
+// ~/.mhclaw/logs/mhclaw_main.log — when something breaks, "send me your
+// log" gives us a fast triage path.
 setupMainLogger();
 
-// macOS 从 Finder/Dock 启动时 PATH 只有 /usr/bin:/bin:/usr/sbin:/sbin,
-// 主进程 spawn npx / node 会 ENOENT。必须在 app 早期就把 PATH 补全,
-// 否则后续 mcp-probe / Gateway env 继承都会受影响。
+// When macOS launches the app from Finder/Dock, PATH is only
+// `/usr/bin:/bin:/usr/sbin:/sbin`, so any `spawn npx / node` from the main
+// process would fail with ENOENT. We patch PATH early so it propagates
+// through to mcp-probe, the Gateway env, and any other subprocess.
 fixProcessPath();
 
 /**
- * 加载应用图标:
- * - 优先 `electron/assets/icon.png`(PNG 对 Electron nativeImage / macOS dock 支持最稳,
- *   打包时 electron-builder 也能识别)
- * - 次选 `electron/assets/logo.svg`(内嵌矢量,dev 场景够用;macOS dock 对 SVG 支持不完全稳)
- * 两者都读不到返回 null,dock/window 会退回系统默认图(灰色 Electron)
+ * Load the app icon:
+ *   - Prefer `electron/assets/icon.png` (PNG works most reliably with
+ *     Electron's nativeImage / macOS Dock; electron-builder also picks
+ *     this up at packaging time).
+ *   - Fallback to `electron/assets/logo.svg` (inline vector, fine in dev;
+ *     macOS Dock support for SVG is shaky).
+ * Returns null if neither is available — the dock/window then falls back
+ * to the default Electron icon (the gray default).
  */
 function loadAppIcon(): Electron.NativeImage | null {
   const pngPath = path.join(__dirname, "assets/icon.png");
@@ -129,17 +135,22 @@ function loadAppIcon(): Electron.NativeImage | null {
 const appIcon = loadAppIcon();
 
 /**
- * 为 mhwork-api 域名的响应注入 CORS 头,让 renderer(http://127.0.0.1:<port>
- * 起源)的 fetch 不被浏览器 CORS 拦截。
+ * Inject CORS headers on responses from the mhwork-api host so that the
+ * renderer (origin http://127.0.0.1:<port>) isn't blocked by browser CORS
+ * when fetching from it.
  *
- * 命中的域名白名单:clawapi.metrichub.app 及 MHWORK_API_URL(若用户覆盖)
- * 不影响任何其他域(只改这些的响应头)。
+ * Whitelisted hosts: `clawapi.metrichub.app` and the value of
+ * `MHWORK_API_URL` (if the user overrides). No other origin is touched —
+ * we only mutate response headers for these specific hosts.
  *
- * 注意:这只改 response 头,不开 webSecurity: false —— 其他跨域场景仍受保护。
+ * NOTE: this only rewrites response headers; it does NOT set
+ * `webSecurity: false`, so cross-origin protections remain intact for
+ * everything else.
  */
 /**
- * 构造生产包菜单(不含 View 菜单的 Reload / DevTools)。
- * macOS 要求保留 App 菜单(第一个位置,用 process.env.name 作为标题)。
+ * Build the production menu (no View → Reload / DevTools).
+ * macOS requires keeping the App menu (first position, titled via
+ * `process.env.name`).
  */
 function buildProdMenu(): Electron.Menu {
   const isMac = process.platform === "darwin";
@@ -194,7 +205,7 @@ function buildProdMenu(): Electron.Menu {
 function installApiCorsBypass() {
   const allowedHosts = new Set<string>();
   allowedHosts.add("clawapi.metrichub.app");
-  // 允许通过 env 覆盖(开发联调本地后端时有用)
+  // Allow override via env (useful for backend dev against a local server).
   const envUrl = process.env.MHWORK_API_URL;
   if (envUrl) {
     try {
@@ -220,11 +231,12 @@ function installApiCorsBypass() {
       }
       const headers = { ...(details.responseHeaders ?? {}) };
 
-      // 只在后端**没返** ACA-* 头时才注入。后端如果已经返了(比如 dev 下
-      // Vite origin localhost:40173 在后端 CORS 白名单里),我们再加 "*"
-      // 就会出现"multiple values"报错。
-      // Electron 的 responseHeaders key 大小写不可预测,先做个不区分大小写的
-      // "已存在"判断。
+      // Only inject Access-Control-Allow-* headers if the backend hasn't
+      // already returned them. If it has (e.g. in dev when the Vite origin
+      // localhost:40173 is on the backend CORS whitelist), adding "*" on
+      // top causes a "multiple values" browser error.
+      // Electron's responseHeaders key casing is not predictable, so we do
+      // a case-insensitive "already present?" check first.
       const hasHeader = (name: string): boolean => {
         const lower = name.toLowerCase();
         return Object.keys(headers).some((k) => k.toLowerCase() === lower);
@@ -247,9 +259,10 @@ function installApiCorsBypass() {
         headers["Access-Control-Allow-Credentials"] = ["true"];
       }
 
-      // 关键:preflight(OPTIONS)若 server 返 4xx,浏览器先判状态码失败,CORS
-      // 头根本不会被读取 → 依然 "Failed to fetch"。把 preflight 状态码改成 200,
-      // 让 renderer 进到真正的请求阶段。
+      // Critical: if the preflight (OPTIONS) returns 4xx, the browser
+      // fails on the status before even reading the CORS headers, leaving
+      // the renderer with "Failed to fetch". Force the preflight status
+      // to 200 so the renderer can proceed with the actual request.
       const override: Electron.HeadersReceivedResponse = {
         responseHeaders: headers,
       };
@@ -264,15 +277,17 @@ function installApiCorsBypass() {
 let mainWindow: BrowserWindow | null = null;
 const gatewayManager = new GatewayManager({ port: DEFAULT_GATEWAY_PORT });
 
-// MCP 子系统 ── registry / supervisor / broker
-// 启动顺序: registry.init → supervisor.init (后台 probe 不阻塞) →
-//          broker.start (拿端口) → gatewayManager.setBrokerEndpoint →
-//          gatewayManager.start (写 mhclaw.json + spawn gateway)
+// MCP subsystem — registry / supervisor / broker.
+// Startup order: registry.init → supervisor.init (background probe, non-
+//   blocking) → broker.start (acquires port) → gatewayManager
+//   .setBrokerEndpoint → gatewayManager.start (writes mhclaw.json +
+//   spawns the gateway).
 const mcpRegistry = new McpRegistry();
 const mcpSupervisor = new McpSupervisor(mcpRegistry);
 const mcpBroker = new McpBroker(mcpRegistry, mcpSupervisor);
 
-// 把 supervisor 的 health 变化广播给所有渲染窗口 (UI 5 态实时刷)
+// Broadcast supervisor health changes to every renderer window so the
+// 5-state MCP UI updates in real time.
 mcpSupervisor.on("health-changed", (evt: { name: string; health?: McpHealth; removed?: boolean }) => {
   for (const win of BrowserWindow.getAllWindows()) {
     if (!win.isDestroyed()) {
@@ -281,13 +296,15 @@ mcpSupervisor.on("health-changed", (evt: { name: string; health?: McpHealth; rem
   }
 });
 
-// 注册自定义协议 scheme(必须在 app.ready 之前)
+// Register custom protocol schemes (must happen before app.ready).
 registerProtocolSchemes();
 
-// ===== Deep Link: mhclaw:// 协议(主路径) =====
-// 注册 mhclaw:// 为默认 client。Electron 官方建议 + single-instance 组合用法。
+// ===== Deep Link: mhclaw:// protocol (primary path) =====
+// Register mhclaw:// as a default client (Electron's recommended pattern,
+// combined with single-instance handling).
 if (process.defaultApp) {
-  // dev 模式(node_modules/.bin/electron .)需要把 script 路径一起注册
+  // In dev (`node_modules/.bin/electron .`) the script path also needs
+  // to be registered alongside the executable.
   if (process.argv.length >= 2) {
     app.setAsDefaultProtocolClient("mhclaw", process.execPath, [
       path.resolve(process.argv[1]),
@@ -297,8 +314,9 @@ if (process.defaultApp) {
   app.setAsDefaultProtocolClient("mhclaw");
 }
 
-// single instance lock: Windows / Linux 下 deep link 会用 argv 传 URL,
-// 必须确保只有第一个实例活着,第二次 launch 的 URL 通过 second-instance 转发。
+// Single-instance lock: on Windows / Linux the deep link is delivered as
+// a process argv. We need exactly one instance alive; subsequent launches
+// forward the URL via the `second-instance` event.
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
   app.quit();
@@ -318,13 +336,14 @@ function handleAuthDeepLink(url: string): void {
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.focus();
   } else {
-    // 冷启动:窗口还没建好,暂存,did-finish-load 再派发
+    // Cold start — window isn't ready yet. Stash the URL; we'll dispatch
+    // it after did-finish-load.
     pendingAuthDeepLink = url;
   }
 }
 
 app.on("second-instance", (_event, argv) => {
-  // Windows / Linux 的 deep link 从这里来
+  // Deep links arrive here on Windows / Linux.
   const url = argv.find((a) => typeof a === "string" && a.startsWith("mhclaw://"));
   if (url) handleAuthDeepLink(url);
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -334,7 +353,7 @@ app.on("second-instance", (_event, argv) => {
 });
 
 app.on("open-url", (event, url) => {
-  // macOS 的 deep link 从这里来
+  // Deep links arrive here on macOS.
   event.preventDefault();
   handleAuthDeepLink(url);
 });
@@ -347,7 +366,8 @@ function createWindow() {
     minHeight: 600,
     title: APP_NAME,
     icon: appIcon ?? undefined,
-    // macOS:隐藏标题栏、红绿灯浮在内容上,TopBar 与 traffic light 共一行(对标 WorkBuddy)
+    // macOS: hide the title bar and float the traffic-light buttons over
+    // the content so the TopBar shares the same row (matching WorkBuddy).
     titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
     trafficLightPosition:
       process.platform === "darwin" ? { x: 14, y: 14 } : undefined,
@@ -358,11 +378,12 @@ function createWindow() {
     },
   });
 
-  // 开发模式加载 Vite dev server，生产模式通过本地 HTTP 服务加载
-  // （打包后 file:// origin 不被 Gateway 接受，需要 http:// origin）
+  // In dev we load from the Vite dev server; in prod we serve via a local
+  // HTTP server. (Packaged builds end up at a `file://` origin which the
+  // Gateway rejects; we need `http://` for the WebSocket handshake.)
   if (process.env.VITE_DEV_SERVER_URL) {
     mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
-    // 开发模式默认打开 DevTools，便于看 console 错误
+    // DevTools auto-opens in dev so console errors are visible.
     mainWindow.webContents.openDevTools({ mode: "detach" });
   } else {
     const distDir = path.join(__dirname, "../dist");
@@ -371,7 +392,8 @@ function createWindow() {
     });
   }
 
-  // 冷启动:deep link 在窗口 ready 前到达,现在派发给渲染进程
+  // Cold start: a deep link can arrive before the window is ready.
+  // Dispatch any stashed URL to the renderer once it's done loading.
   mainWindow.webContents.on("did-finish-load", () => {
     if (pendingAuthDeepLink && mainWindow) {
       mainWindow.webContents.send("auth:deeplink", pendingAuthDeepLink);
@@ -379,15 +401,17 @@ function createWindow() {
     }
   });
 
-  // 生产包禁用:Cmd/Ctrl+R 刷新 + F12/Cmd+Opt+I/Cmd+Shift+I 打开 DevTools +
-  // 右键菜单的 Inspect Element。工作台不是网页,刷新会打断正在跑的任务,
-  // DevTools 对终端用户也没意义。开发模式(VITE_DEV_SERVER_URL)保持原样。
+  // In packaged builds, disable Cmd/Ctrl+R reload, F12 / Cmd+Opt+I /
+  // Cmd+Shift+I DevTools shortcuts, and the right-click "Inspect" menu.
+  // This is a workbench, not a webpage — reloading interrupts in-flight
+  // tasks, and DevTools is meaningless for end users. Dev mode
+  // (VITE_DEV_SERVER_URL) keeps default behavior.
   if (app.isPackaged) {
     mainWindow.webContents.on("before-input-event", (event, input) => {
       if (input.type !== "keyDown") return;
       const cmd = process.platform === "darwin" ? input.meta : input.control;
       const key = input.key.toLowerCase();
-      // 刷新
+      // Reload
       if (cmd && key === "r") {
         event.preventDefault();
         return;
@@ -416,16 +440,17 @@ function createWindow() {
   });
 }
 
-// Gateway 状态变化推送到渲染进程
-// 顺带带上最新的 auth token —— Gateway 启动后会晚一点才写 token 到 config,
-// watchForAuthToken 会在 token 出现时再触发一次 emitStatus,这里把 token
-// 附上,渲染进程拿到后能立即更新 gw.token 并重连。
+// Push gateway status changes to the renderer.
+// We tag the latest auth token along — the Gateway writes its token to
+// the config a little after startup; `watchForAuthToken` re-emits status
+// once the token shows up, and we attach it here so the renderer can
+// update gw.token and reconnect immediately.
 gatewayManager.setStatusListener((status: GatewayStatus) => {
   const token = gatewayManager.getAuthToken();
   mainWindow?.webContents.send("gateway:status-changed", { ...status, token });
 });
 
-// IPC: 内置 Gateway 控制
+// IPC: embedded Gateway control
 ipcMain.handle("gateway:start", () => gatewayManager.start());
 ipcMain.handle("gateway:stop", () => gatewayManager.stop());
 ipcMain.handle("gateway:restart", () => gatewayManager.restart());
@@ -436,7 +461,7 @@ ipcMain.handle("gateway:status", () => ({
   token: gatewayManager.getAuthToken(),
 }));
 
-// IPC: 窗口控制
+// IPC: window control
 ipcMain.handle("window:minimize", () => mainWindow?.minimize());
 ipcMain.handle("window:maximize", () => {
   if (mainWindow?.isMaximized()) {
@@ -447,17 +472,17 @@ ipcMain.handle("window:maximize", () => {
 });
 ipcMain.handle("window:close", () => mainWindow?.close());
 
-// IPC: 技能文件操作
+// IPC: skill file operations
 const getSkillsDir = () => path.join(getStateDir(), "workspace", "skills");
 
 ipcMain.handle("skills:fetchFromGithub", async (_event, url: string) => {
-  // 从 GitHub URL 提取 owner/repo，构造 raw URL 拉取 SKILL.md
+  // Extract owner/repo from a GitHub URL and build the raw URL for SKILL.md.
   const match = url.match(/github\.com\/([^/]+)\/([^/]+)/);
-  if (!match) throw new Error("无效的 GitHub URL");
+  if (!match) throw new Error("Invalid GitHub URL");
   const [, owner, repo] = match;
   const repoName = repo.replace(/\.git$/, "");
 
-  // 尝试 main 和 master 分支
+  // Try `main` then `master`.
   for (const branch of ["main", "master"]) {
     const rawUrl = `https://raw.githubusercontent.com/${owner}/${repoName}/${branch}/SKILL.md`;
     try {
@@ -473,7 +498,7 @@ ipcMain.handle("skills:fetchFromGithub", async (_event, url: string) => {
       continue;
     }
   }
-  throw new Error("未找到 SKILL.md 文件，请确认仓库中包含 SKILL.md");
+  throw new Error("SKILL.md not found in the repository");
 });
 
 ipcMain.handle("skills:saveSkillFile", async (_event, name: string, content: string) => {
@@ -484,10 +509,10 @@ ipcMain.handle("skills:saveSkillFile", async (_event, name: string, content: str
 });
 
 ipcMain.handle("skills:openFileDialog", async () => {
-  if (!mainWindow) throw new Error("窗口不可用");
+  if (!mainWindow) throw new Error("Window not available");
   const result = await dialog.showOpenDialog(mainWindow, {
-    title: "选择 skill zip 包",
-    filters: [{ name: "Skill 包", extensions: ["zip"] }],
+    title: "Select a skill zip",
+    filters: [{ name: "Skill package", extensions: ["zip"] }],
     properties: ["openFile"],
   });
   if (result.canceled || result.filePaths.length === 0) return null;
@@ -495,26 +520,29 @@ ipcMain.handle("skills:openFileDialog", async () => {
 });
 
 /**
- * 从 zip 包安装 skill:
- *  1. 解压到 ~/.mhclaw/workspace/skills/<name>/
- *  2. name 优先从 zip 内部的顶层目录推断,其次从 SKILL.md frontmatter 的 name 字段,
- *     最后 fallback 到 zip 文件名(去掉版本号 / 扩展名)
- *  3. 如果 zip 里顶层是一个单独的目录(如 tencent-docs/SKILL.md),把这个目录整个当成 skill
- *  4. 如果 zip 顶层直接是 SKILL.md,用 zip 文件名当 skill 名
+ * Install a skill from a zip:
+ *   1. Extract to ~/.mhclaw/workspace/skills/<name>/
+ *   2. Resolve `name` in this priority order:
+ *        a. The zip's single top-level directory (if exactly one).
+ *        b. The `name` field in SKILL.md frontmatter.
+ *        c. Fallback to the zip filename (with version/extension stripped).
+ *   3. If the zip's top level is a single directory (e.g. tencent-docs/
+ *      SKILL.md), treat that whole directory as the skill.
+ *   4. If SKILL.md is at the root, use the zip filename as the skill name.
  *
- * 返回 { name } 给前端 toast 显示。
+ * Returns `{ name }` for the renderer toast.
  */
 ipcMain.handle("skills:installZip", async (_event, zipPath: string) => {
   if (!zipPath || !fs.existsSync(zipPath)) {
-    throw new Error("zip 文件不存在");
+    throw new Error("zip file not found");
   }
   const { default: AdmZip } = await import("adm-zip");
   const zip = new AdmZip(zipPath);
   const entries = zip.getEntries();
-  if (entries.length === 0) throw new Error("zip 包是空的");
+  if (entries.length === 0) throw new Error("zip is empty");
 
-  // 判断:顶层是单个目录?还是 SKILL.md 直接在根?
-  // 每个 entry.entryName 是 posix 路径(比如 "tencent-docs/SKILL.md"、"SKILL.md")
+  // Inspect top-level layout: a single directory? Or SKILL.md at the root?
+  // Each entry.entryName is a posix path (e.g. "tencent-docs/SKILL.md", "SKILL.md").
   const topSegments = new Set<string>();
   let hasRootSkillMd = false;
   for (const e of entries) {
@@ -529,7 +557,7 @@ ipcMain.handle("skills:installZip", async (_event, zipPath: string) => {
   let skillName: string;
   let stripTopDir: string | null = null;
   if (hasRootSkillMd) {
-    // 根是 SKILL.md,用 zip 文件名作 skill 名(去掉版本号和扩展名)
+    // SKILL.md at root → derive name from zip filename (drop version + ext).
     const base = path.basename(zipPath, path.extname(zipPath));
     skillName = base.replace(/[-_]?v?\d+(\.\d+)*$/i, "").trim() || base;
   } else if (topSegments.size === 1) {
@@ -537,20 +565,20 @@ ipcMain.handle("skills:installZip", async (_event, zipPath: string) => {
     skillName = top;
     stripTopDir = top;
   } else {
-    // 多个顶层目录,用 zip 文件名
+    // Multiple top-level directories — fall back to the zip filename.
     skillName = path.basename(zipPath, path.extname(zipPath));
   }
 
-  // 目标目录,存在就拒绝(避免覆盖用户已装 skill)
+  // Refuse to overwrite an existing skill — user must delete first.
   const skillsDir = getSkillsDir();
   fs.mkdirSync(skillsDir, { recursive: true });
   const targetDir = path.join(skillsDir, skillName);
   if (fs.existsSync(targetDir)) {
-    throw new Error(`skill "${skillName}" 已存在,请先删除再安装`);
+    throw new Error(`Skill "${skillName}" already exists; delete it first.`);
   }
   fs.mkdirSync(targetDir, { recursive: true });
 
-  // 解压,可选剥离顶层目录
+  // Extract; optionally strip the top-level directory.
   for (const e of entries) {
     if (e.isDirectory) continue;
     let rel = e.entryName;
@@ -559,7 +587,7 @@ ipcMain.handle("skills:installZip", async (_event, zipPath: string) => {
     }
     if (!rel) continue;
     const destPath = path.join(targetDir, rel);
-    // 防 zip-slip
+    // Zip-slip protection.
     if (!destPath.startsWith(targetDir + path.sep) && destPath !== targetDir) {
       continue;
     }
@@ -567,7 +595,8 @@ ipcMain.handle("skills:installZip", async (_event, zipPath: string) => {
     fs.writeFileSync(destPath, e.getData());
   }
 
-  // 如果 SKILL.md 的 frontmatter 里有 name,用它修正 skillName(但已建目录不改,只给 toast 用)
+  // If SKILL.md frontmatter declares a `name`, use it to refine skillName
+  // for the toast (the on-disk directory name is kept as-is).
   try {
     const skillMdPath = path.join(targetDir, "SKILL.md");
     if (fs.existsSync(skillMdPath)) {
@@ -579,7 +608,7 @@ ipcMain.handle("skills:installZip", async (_event, zipPath: string) => {
       }
     }
   } catch {
-    // 忽略,用目录名
+    // ignore — fall back to the directory name.
   }
 
   return { name: skillName, path: targetDir };
@@ -589,16 +618,17 @@ ipcMain.handle("skills:deleteCustomSkill", async (_event, name: string) => {
   const rootDir = getSkillsDir();
   if (!fs.existsSync(rootDir)) return;
 
-  // 直接按目录名匹配(目录名就是 slug 时的快路径)
+  // Fast path: directory name matches when skillKey == directory slug.
   const direct = path.join(rootDir, name);
   if (fs.existsSync(direct) && fs.statSync(direct).isDirectory()) {
     fs.rmSync(direct, { recursive: true });
     return;
   }
 
-  // Gateway 的 skills.status 对非标准 skill 可能返显示名当 skillKey(如
-  // "Excel / XLSX"→目录 excel-xlsx),直接拼路径会 miss。扫 skills 根目录,
-  // 读每个 SKILL.md frontmatter 的 name/slug 做匹配。
+  // Gateway's skills.status sometimes returns a display name as the
+  // skillKey (e.g. "Excel / XLSX" → directory excel-xlsx), in which case
+  // a plain path join misses. Walk the skills root and match by SKILL.md
+  // frontmatter name / slug instead.
   const target = name.trim();
   const entries = fs.readdirSync(rootDir);
   for (const entry of entries) {
@@ -624,18 +654,21 @@ ipcMain.handle("skills:deleteCustomSkill", async (_event, name: string) => {
       continue;
     }
   }
-  // 找不到也不报错:可能是 bundled / managed 层的,不归这个 handler 管
+  // Not found: silently no-op. May belong to the bundled / managed layer,
+  // which is not this handler's concern.
 });
 
 /**
- * 从 URL 下载 skill zip 并解压到 ~/.mhclaw/workspace/skills/<slug>/
- * 用于 SkillHub 一键安装。
+ * Download a skill zip and extract it to
+ * `~/.mhclaw/workspace/skills/<slug>/`. Used by SkillHub one-click install.
  *
- * zip 结构兼容两种:
- *   A) 扁平根(hub 的标准):/SKILL.md /_meta.json ...
- *   B) 含 slug 目录包裹:   /<slug>/SKILL.md ...
- * 处理:先解压到临时目录,再判断顶层是单一目录(B)还是散文件(A),
- * 统一搬到 skills/<slug>/ 下,保证布局一致。
+ * Supports two zip layouts:
+ *   A) Flat root (hub standard): /SKILL.md /_meta.json ...
+ *   B) Wrapped in a slug directory: /<slug>/SKILL.md ...
+ *
+ * We extract to a temp dir, detect whether the top level is a single
+ * directory (B) or loose files (A), then move into `skills/<slug>/` for
+ * a uniform layout.
  */
 ipcMain.handle(
   "skills:installFromUrl",
@@ -648,7 +681,8 @@ ipcMain.handle(
     }: {
       url: string;
       slug: string;
-      /** hub 侧 metadata,安装后写 sidecar 给 UI 用(displayName 覆盖等) */
+      /** Hub-side metadata; we write a sidecar after install so the UI
+       *  can override displayName, etc. */
       meta?: {
         displayName?: string;
         description?: string;
@@ -659,10 +693,10 @@ ipcMain.handle(
       };
     },
   ) => {
-    if (!slug || !/^[a-z0-9._-]+$/i.test(slug)) throw new Error("非法 slug");
+    if (!slug || !/^[a-z0-9._-]+$/i.test(slug)) throw new Error("Invalid slug");
 
     const res = await fetch(url);
-    if (!res.ok) throw new Error(`下载失败 HTTP ${res.status}`);
+    if (!res.ok) throw new Error(`Download failed: HTTP ${res.status}`);
     const buffer = Buffer.from(await res.arrayBuffer());
 
     const tmpZip = path.join(getStateDir(), "cache", `${slug}-${Date.now()}.zip`);
@@ -682,7 +716,7 @@ ipcMain.handle(
       zip.extractAllTo(tmpExtract, true);
 
       const entries = fs.readdirSync(tmpExtract, { withFileTypes: true });
-      // 判断是否"单一顶层目录"结构
+      // Detect the "single top-level directory" layout.
       const rootDir =
         entries.length === 1 && entries[0].isDirectory()
           ? path.join(tmpExtract, entries[0].name)
@@ -691,13 +725,13 @@ ipcMain.handle(
       const targetRoot = getSkillsDir();
       fs.mkdirSync(targetRoot, { recursive: true });
       const installedDir = path.join(targetRoot, slug);
-      // 覆盖安装:先清空目标(如果存在),再从 rootDir 递归拷贝
+      // Reinstall: nuke the target if it exists, then copy from rootDir.
       if (fs.existsSync(installedDir)) {
         fs.rmSync(installedDir, { recursive: true, force: true });
       }
       fs.cpSync(rootDir, installedDir, { recursive: true });
 
-      // 写 hub sidecar(UI 读它来覆盖 displayName 等展示字段)
+      // Write the hub sidecar (UI reads it to override displayName, etc.).
       if (meta) {
         try {
           fs.writeFileSync(
@@ -718,7 +752,7 @@ ipcMain.handle(
             ),
           );
         } catch {
-          /* sidecar 写失败不阻断安装 */
+          // Sidecar write failure shouldn't block install.
         }
       }
 
@@ -739,9 +773,10 @@ ipcMain.handle(
 );
 
 /**
- * 批量读 workspace/skills/<slug>/.mhclaw-hub.json 返回 map。
- * 用于 UI 展示已装 skill 时用 hub 的 displayName 覆盖英文 SKILL.md name。
- * 不是 hub 装的就没 sidecar,返回 map 里没这个 key。
+ * Batch-read every `workspace/skills/<slug>/.mhclaw-hub.json` and return
+ * the result as a map. The UI overlays the hub's `displayName` on top of
+ * the English `SKILL.md` name. Skills not installed via the hub have no
+ * sidecar and aren't keyed in the result.
  */
 ipcMain.handle("skills:readHubSidecars", async () => {
   const root = getSkillsDir();
@@ -756,9 +791,13 @@ ipcMain.handle("skills:readHubSidecars", async () => {
       version?: string;
       source?: string;
       installedAt?: number;
-      /** SKILL.md frontmatter 的 name 字段,用于 UI 反查(Gateway skillKey 有时
-       *  返的是 SKILL.md name 而不是目录 slug,renderer 拿不到 SKILL.md 没法
-       *  反查,由主进程一并返回) */
+      /**
+       * The `name` field from SKILL.md frontmatter, returned for
+       * UI lookup. Gateway's skills.status sometimes returns the
+       * SKILL.md name as `skillKey` instead of the directory slug,
+       * and the renderer can't read SKILL.md directly — we fetch it
+       * here in the main process so the UI has both.
+       */
       mdName?: string;
     }
   > = {};
@@ -776,7 +815,8 @@ ipcMain.handle("skills:readHubSidecars", async () => {
     try {
       const raw = fs.readFileSync(sidecar, "utf8");
       const data = JSON.parse(raw);
-      // 额外读 SKILL.md frontmatter 的 name 当 alias,用于跨"显示名 vs slug"匹配
+      // Also read the SKILL.md frontmatter `name` as an alias so the UI
+      // can match across both display name and slug.
       let mdName: string | undefined;
       const mdFile = path.join(root, ent.name, "SKILL.md");
       if (fs.existsSync(mdFile)) {
@@ -793,23 +833,24 @@ ipcMain.handle("skills:readHubSidecars", async () => {
       }
       map[ent.name] = { ...data, mdName };
     } catch {
-      /* ignore 坏 sidecar */
+      // Ignore corrupt sidecar files.
     }
   }
   return map;
 });
 
 /**
- * 读取某个 skill 的 SKILL.md 源码。按优先级从高到低查找：
- *   1. workspace/skills/<name>/SKILL.md     （最高）
- *   2. ~/.mhclaw/skills/<name>/SKILL.md     （managed）
- *   3. node_modules/openclaw/skills/<name>/SKILL.md （bundled）
- * 用于技能详情 Dialog 的"原文"模式。
+ * Read a skill's SKILL.md source. Lookup order (high to low priority):
+ *   1. workspace/skills/<name>/SKILL.md         (highest)
+ *   2. ~/.mhclaw/skills/<name>/SKILL.md         (managed)
+ *   3. node_modules/openclaw/skills/<name>/SKILL.md  (bundled)
+ *
+ * Used by the skill detail Dialog's "raw source" view.
  */
 ipcMain.handle("skills:getMd", async (_event, name: string) => {
   if (!name || typeof name !== "string") throw new Error("skill name required");
 
-  // 解析 openclaw bundled skills 根目录（复用 gateway-manager 的思路）
+  // Resolve the OpenClaw bundled skills root (same approach as gateway-manager).
   const { createRequire } = await import("node:module");
   const req = createRequire(path.join(__dirname, "package.json"));
   let bundledRoot = "";
@@ -817,12 +858,12 @@ ipcMain.handle("skills:getMd", async (_event, name: string) => {
     const pkgMain = req.resolve("openclaw");
     const pkgRoot = path.resolve(path.dirname(pkgMain), "..");
     bundledRoot = path.join(pkgRoot, "skills");
-    // 打包 asar 场景
+    // Handle the asar-packaged case.
     if (bundledRoot.includes("app.asar" + path.sep) || bundledRoot.includes("app.asar/")) {
       bundledRoot = bundledRoot.replace(/app\.asar(?=[\\/])/, "app.asar.unpacked");
     }
   } catch {
-    // 不影响，下面 workspace/managed 仍可找到
+    // Doesn't matter — workspace / managed lookups can still find it.
   }
 
   const candidates: Array<{ source: string; file: string }> = [
@@ -847,10 +888,12 @@ ipcMain.handle("skills:getMd", async (_event, name: string) => {
     }
   }
 
-  // 兜底:Gateway 的 skills.status 对非标准 skill(如 mhclaw 从 SkillHub 装的
-  // Excel / XLSX、Word / DOCX)返回的 skillKey 有时是**显示名**而不是目录名,
-  // 按 name 直接拼路径找不到。扫一遍 workspace + managed,读每个 SKILL.md 的
-  // frontmatter,按 name / slug 匹配。代价几十个 existsSync + read,够快。
+  // Fallback: Gateway's skills.status sometimes returns the **display
+  // name** as skillKey for non-standard skills (e.g. SkillHub installs
+  // like "Excel / XLSX", "Word / DOCX") instead of the directory slug.
+  // Path-by-name lookup misses those. Walk workspace + managed, parse
+  // each SKILL.md frontmatter, and match by name / slug. Cost is ~tens of
+  // existsSync + read calls — fast enough.
   const scanRoots = [
     { source: "workspace", dir: getSkillsDir() },
     { source: "managed", dir: path.join(getStateDir(), "skills") },
@@ -870,8 +913,9 @@ ipcMain.handle("skills:getMd", async (_event, name: string) => {
       if (!fs.existsSync(file)) continue;
       try {
         const content = fs.readFileSync(file, "utf-8");
-        // 简单匹配 frontmatter 的 name / slug(不依赖完整 YAML 解析,OpenClaw
-        // 的 frontmatter 第一段是 --- 包起来的 key: value 列表)
+        // Simple frontmatter name / slug match (no full YAML parser
+        // needed — OpenClaw's frontmatter is just a `--- key: value ---`
+        // block).
         const fm = content.match(/^---\s*\n([\s\S]*?)\n---/);
         if (!fm) continue;
         const block = fm[1];
@@ -895,20 +939,20 @@ ipcMain.handle("skills:getMd", async (_event, name: string) => {
   throw new Error(`SKILL.md not found for "${name}"`);
 });
 
-// IPC: 工作根
+// IPC: work root
 ipcMain.handle("workRoot:get", () => getWorkRoot());
 ipcMain.handle("workRoot:set", async (_e, newPath: string) => setWorkRoot(newPath));
 ipcMain.handle("workRoot:pickAndSet", async () => {
-  if (!mainWindow) throw new Error("窗口不可用");
+  if (!mainWindow) throw new Error("Window not available");
   const res = await dialog.showOpenDialog(mainWindow, {
-    title: "选择 mhclaw 工作根目录",
+    title: "Choose mhclaw work-root directory",
     properties: ["openDirectory", "createDirectory"],
   });
   if (res.canceled || res.filePaths.length === 0) return null;
   return setWorkRoot(res.filePaths[0]);
 });
 
-// IPC: 任务目录
+// IPC: task folders
 ipcMain.handle("taskFolder:listRecent", () => listOutputDirs());
 ipcMain.handle("taskFolder:createBlank", async (_e, sessionKey?: string) => {
   const result = createBlankTask(sessionKey ? { sessionKey } : undefined);
@@ -917,9 +961,9 @@ ipcMain.handle("taskFolder:createBlank", async (_e, sessionKey?: string) => {
   return result;
 });
 ipcMain.handle("taskFolder:pickExternal", async (_e, sessionKey?: string) => {
-  if (!mainWindow) throw new Error("窗口不可用");
+  if (!mainWindow) throw new Error("Window not available");
   const res = await dialog.showOpenDialog(mainWindow, {
-    title: "选择任务产出目录",
+    title: "Choose a task output directory",
     properties: ["openDirectory", "createDirectory"],
   });
   if (res.canceled || res.filePaths.length === 0) return null;
@@ -941,9 +985,11 @@ ipcMain.handle("taskFolder:getForSession", (_e, sessionKey: string) =>
 );
 /**
  * ensureForSession:
- *   已绑定 → 直接返回;未绑定 → createBlank 并绑。幂等,lazy 触发点。
- *   正式调用方:chat-store.sendMessage 前置(真要用了才建,避免空目录污染)
- *             + AssistantFinal(兜底,确保 artifacts 能落盘)
+ *   If already bound → return as-is. If not → createBlank + bind.
+ *   Idempotent, lazy. Primary callers:
+ *     - chat-store.sendMessage (creates only when actually about to send,
+ *       avoiding empty-folder noise),
+ *     - AssistantFinal (safety net so artifacts can always land on disk).
  */
 ipcMain.handle(
   "taskFolder:remapSession",
@@ -971,7 +1017,7 @@ ipcMain.handle("taskFolder:openInFinder", async (_e, dirPath: string) => {
   return { ok: true };
 });
 
-// IPC: 产物(artifacts,真相源在 <task-folder>/.mhclaw/artifacts.json)
+// IPC: artifacts (source of truth lives at <task-folder>/.mhclaw/artifacts.json)
 ipcMain.handle("artifacts:list", (_e, sessionKey: string) =>
   listArtifactsForSession(sessionKey),
 );
@@ -981,11 +1027,12 @@ ipcMain.handle(
     addArtifactsForSession(sessionKey, entries),
 );
 
-// IPC: 系统授权(macOS 权限检测 + 跳转)
+// IPC: system permissions (macOS permission probe + Settings deeplink)
 /**
- * 返回 macOS 各项权限的状态。
- * 只有"辅助功能"能直接 API 检测;其他(完全磁盘/自动化/通知)没稳定 API,
- * 客户端只显示"去授权"按钮,不标注状态。
+ * Returns the status of various macOS permissions.
+ * Only Accessibility can be probed directly via API; for the others
+ * (Full Disk / Automation / Notifications) there's no stable API, so
+ * the client just shows a "Grant access" button without any status.
  */
 ipcMain.handle("system:getPermissions", () => {
   if (process.platform !== "darwin") {
@@ -998,7 +1045,7 @@ ipcMain.handle("system:getPermissions", () => {
   };
 });
 
-/** 打开 macOS 系统设置到对应的隐私面板 */
+/** Open macOS System Settings at the specified privacy pane. */
 ipcMain.handle("system:openPrivacy", async (_e, kind: string) => {
   if (process.platform !== "darwin") return { ok: false, reason: "non-darwin" };
   const map: Record<string, string> = {
@@ -1016,7 +1063,7 @@ ipcMain.handle("system:openPrivacy", async (_e, kind: string) => {
   return { ok: true };
 });
 
-// IPC: 在用户默认浏览器打开 URL(用于"去网页端注册"等场景)
+// IPC: open a URL in the user's default browser (e.g. "Register on web").
 ipcMain.handle("system:openExternal", async (_e, url: string) => {
   if (typeof url !== "string" || !/^https?:\/\//.test(url)) {
     return { ok: false, reason: "invalid-url" };
@@ -1025,14 +1072,17 @@ ipcMain.handle("system:openExternal", async (_e, url: string) => {
   return { ok: true };
 });
 
-// IPC: 微信扫码登录
-//  - 渲染进程 invoke("weixin:login:start") → 主进程 spawn openclaw CLI,
-//    从 stdout 拦截 "https://open.work.weixin.qq.com/..." 这类二维码 URL,
-//    通过 "weixin:login:qr" 推给渲染进程(URL + message)
-//  - CLI 自己轮询登录状态,成功/失败后退出,通过 "weixin:login:done" 推结果
-//  - invoke("weixin:login:cancel") 杀子进程
+// IPC: WeChat QR login
+//   - Renderer invoke("weixin:login:start") → main process spawns the
+//     openclaw CLI, watches stdout for a QR URL (e.g.
+//     "https://open.work.weixin.qq.com/..."), and forwards it back via
+//     the "weixin:login:qr" event (URL + message).
+//   - The CLI polls login state on its own and exits on success/failure;
+//     the outcome is delivered via the "weixin:login:done" event.
+//   - invoke("weixin:login:cancel") kills the child process.
 let weixinLoginCancel: (() => void) | null = null;
-// 二维码 URL 的启发式正则:tencent / qq.com / iLink 域名,http(s) 开头
+// Heuristic regex for the QR URL: any tencent / qq.com / iLink domain
+// over http(s).
 const WEIXIN_QR_URL_RE = /https?:\/\/[^\s]*(?:qq\.com|weixin\.qq\.com|ilink)[^\s]*/gi;
 
 ipcMain.handle("weixin:login:start", async () => {
@@ -1051,7 +1101,7 @@ ipcMain.handle("weixin:login:start", async () => {
     {
       onStdout: (chunk) => {
         buffered += chunk;
-        // 给渲染进程透传 raw log(前端可选择显示)
+        // Forward raw stdout to the renderer (UI can opt-in to display).
         send("weixin:login:log", chunk);
         if (!qrFound) {
           const match = buffered.match(WEIXIN_QR_URL_RE);
@@ -1082,7 +1132,7 @@ ipcMain.handle("weixin:login:cancel", async () => {
   return { ok: false, reason: "not-running" };
 });
 
-// IPC: 防休眠(powerSaveBlocker)
+// IPC: prevent system sleep (powerSaveBlocker)
 let powerBlockerId: number | null = null;
 ipcMain.handle("system:setPreventSleep", (_e, enabled: boolean) => {
   if (enabled) {
@@ -1105,8 +1155,9 @@ ipcMain.handle("system:getPreventSleep", () => ({
     powerBlockerId !== null && powerSaveBlocker.isStarted(powerBlockerId),
 }));
 
-// IPC: 授权目录 —— 每次增删后同步刷新 authorized file watcher,
-// 确保新加的目录立刻被监听 / 移除的目录立即停止监听
+// IPC: authorized directories. Refresh the file watcher on every add /
+// remove so a newly added directory is watched immediately and a removed
+// one stops being watched immediately.
 async function syncAuthorizedWatchers(): Promise<void> {
   try {
     await refreshAuthorizedWatchers(listAuthorizedDirs().map((d) => d.path));
@@ -1129,16 +1180,17 @@ ipcMain.handle("authorizedDirs:remove", async (_e, absPath: string) => {
   return { ok: true };
 });
 ipcMain.handle("authorizedDirs:pickAndAdd", async (_e, note?: string) => {
-  if (!mainWindow) throw new Error("窗口不可用");
+  if (!mainWindow) throw new Error("Window not available");
   const res = await dialog.showOpenDialog(mainWindow, {
-    title: "选择授权目录(AI 可访问)",
+    title: "Choose an authorized directory (AI may access it)",
     properties: ["openDirectory"],
   });
   if (res.canceled || res.filePaths.length === 0) return null;
   return addAuthorizedDir(res.filePaths[0], note);
 });
 
-// IPC: MCP probe —— 不依赖 gateway,主进程自己起轻量 MCP client 拉 tool 列表
+// IPC: MCP probe — independent of the gateway; the main process runs
+// its own lightweight MCP client to fetch the tool list.
 ipcMain.handle(
   "mcpProbe:one",
   async (
@@ -1170,7 +1222,7 @@ ipcMain.handle(
   },
 );
 
-// ───── IPC: MCP registry / supervisor / broker (broker 架构下的真实来源) ─────
+// ───── IPC: MCP registry / supervisor / broker (the source of truth under the broker architecture) ─────
 
 ipcMain.handle(
   "mcpRegistry:list",
@@ -1208,15 +1260,16 @@ ipcMain.handle("mcpSupervisor:probe", (_e, name: string) => {
   return { ok: true as const };
 });
 
-/** 读最近 N 条 snapshot, 倒序 (最新在前) */
+/** Read the last N snapshot entries, newest first. */
 ipcMain.handle(
   "mcpBroker:snapshotTail",
   async (_e, opts: { limit?: number; brokerSessionId?: string } = {}) => {
     const limit = Math.max(1, Math.min(opts.limit ?? 200, 2000));
     const file = path.join(getMcpRunsDir(), "mcp-calls.jsonl");
     if (!fs.existsSync(file)) return [] as McpRunSnapshotEntry[];
-    // 简单做法: 全读再过滤 + 截尾。日均规模可控 (jsonl 一条 ~200B,
-    // 万次调用 ~2MB), 不引入 reverse-stream 依赖
+    // Naive approach: read the whole file, filter, slice. Scale stays
+    // small (~200B per JSONL entry → ~2MB at 10k calls) so we skip
+    // pulling in a reverse-stream dependency.
     const raw = fs.readFileSync(file, "utf-8");
     const lines = raw.split("\n").filter((l) => l.trim());
     const out: McpRunSnapshotEntry[] = [];
@@ -1240,7 +1293,7 @@ ipcMain.handle(
 
 ipcMain.handle("mcpBroker:endpoint", () => mcpBroker.getEndpoint());
 
-// IPC: 文件系统(任务目录里)
+// IPC: filesystem within a task directory
 ipcMain.handle(
   "fs:listChildren",
   (_e, args: { taskPath: string; rel: string }) =>
@@ -1266,7 +1319,7 @@ ipcMain.handle(
   },
 );
 
-// IPC: 快照
+// IPC: change-tracking snapshots
 ipcMain.handle("snapshot:has", (_e, taskPath: string) => hasBaseline(taskPath));
 ipcMain.handle("snapshot:capture", (_e, taskPath: string) =>
   captureBaseline(taskPath),
@@ -1278,7 +1331,7 @@ ipcMain.handle(
     readBaselineText(args.taskPath, args.rel),
 );
 
-// IPC: 文件监听
+// IPC: file watcher
 ipcMain.handle("fileWatcher:start", async (_e, taskPath: string) => {
   await startWatching(taskPath, (event: WatcherEvent) => {
     mainWindow?.webContents.send("fileWatcher:event", event);
@@ -1290,17 +1343,21 @@ ipcMain.handle("fileWatcher:stop", async () => {
   return { ok: true };
 });
 
-// App 生命周期
+// App lifecycle
 app.whenReady().then(async () => {
-  // macOS:设置 dock 图标(Cmd+Tab、Dock 都会显示);Windows/Linux 走 BrowserWindow.icon
+  // macOS: set the Dock icon (also used for Cmd+Tab). Windows / Linux
+  // pick up the icon via BrowserWindow.icon instead.
   if (process.platform === "darwin" && app.dock && appIcon) {
     app.dock.setIcon(appIcon);
   }
 
-  // 生产包替换默认菜单:
-  // - macOS:保留必要的 App / Edit / Window 菜单(App 菜单不能删,否则红绿灯消失
-  //   行为异常;标准 macOS 应用都有这几项),去掉含 Reload / DevTools 的 View 菜单
-  // - Windows / Linux:菜单栏显示在窗口顶部,我们产品不需要菜单 → 直接隐藏整条
+  // Replace the default menu in packaged builds:
+  //   - macOS: keep the required App / Edit / Window menus (the App menu
+  //     can't be removed without breaking the traffic-light buttons —
+  //     standard macOS apps have all three), but drop the View menu so
+  //     Reload / DevTools shortcuts disappear.
+  //   - Windows / Linux: the menu bar lives at the top of the window;
+  //     this product doesn't need a menu → hide it entirely.
   if (app.isPackaged) {
     if (process.platform === "darwin") {
       Menu.setApplicationMenu(buildProdMenu());
@@ -1309,7 +1366,7 @@ app.whenReady().then(async () => {
     }
   }
 
-  // 提前 ensure 工作根 + AGENTS.md contribution(在 Gateway 启动前就准备好)
+  // Pre-ensure the work root + AGENTS.md contribution before Gateway start.
   try {
     ensureWorkRoot();
     const agentWorkspace = path.join(getStateDir(), "workspace");
@@ -1318,24 +1375,27 @@ app.whenReady().then(async () => {
     console.warn("[Main] Failed to ensure work root / agents.md:", err);
   }
 
-  // 注册协议 handler(必须在 ready 之后)
+  // Register protocol handlers (must happen after `ready`).
   try {
     registerProtocolHandlers();
   } catch (err) {
     console.warn("[Main] Failed to register protocol handlers:", err);
   }
 
-  // Prod 里 renderer 从 http://127.0.0.1:<随机端口> 加载,向 mhwork-api
-  // (clawapi.metrichub.app)发请求会被浏览器 CORS 拦住 ——
-  // 后端 CORS 白名单里没有 127.0.0.1。桌面 app 本来就是"第一方客户端",
-  // 不是真跨站,拦截主进程层的响应头,为我们自己的 API 域名人为注入
-  // Access-Control-Allow-Origin,绕开 renderer 的 CORS 检查。
+  // In production the renderer loads from http://127.0.0.1:<port>;
+  // requests to mhwork-api (clawapi.metrichub.app) would be blocked by
+  // the browser CORS check because the backend whitelist doesn't include
+  // 127.0.0.1. A desktop app is logically a first-party client, not a
+  // cross-origin site, so we intercept the response headers in the main
+  // process and inject Access-Control-Allow-Origin for our own API host
+  // — bypassing the renderer's CORS check.
   installApiCorsBypass();
 
   createWindow();
 
-  // 授权目录 watcher 常驻订阅 —— 跟 task watcher 并列,让 authorized 类 URL
-  // 的 embed 按钮也能实时反映文件变化
+  // Long-lived authorized-directory watcher subscription — runs alongside
+  // the task watcher so embed buttons over `authorized://` URLs reflect
+  // file changes in real time.
   try {
     installAuthorizedWatchers((event) => {
       mainWindow?.webContents.send("fileWatcher:event", event);
@@ -1347,11 +1407,13 @@ app.whenReady().then(async () => {
     console.warn("[Main] Failed to install authorized watchers:", err);
   }
 
-  // ===== MCP 子系统启动 (在 gateway 之前 —— 保证 mhclaw.json 写入时
-  //       broker URL 已 ready, OpenClaw 启动就只看到 broker 一条) =====
+  // ===== Bring up the MCP subsystem before the Gateway. The broker URL
+  //       must be ready when mhclaw.json is written, so OpenClaw sees a
+  //       single broker entry from the very first startup.
   try {
-    // 一次性 migration: 旧 mhclaw.json 里 mcp.servers → registry
-    // 之后 gatewayManager 会把 mhclaw.json mcp.servers 改写为 broker entry
+    // One-shot migration: any `mcp.servers` block in mhclaw.json is
+    // copied into the registry. gateway-manager then rewrites
+    // `mcp.servers` in mhclaw.json down to the broker entry.
     const legacy = readLegacyMcpServers(getConfigPath());
     mcpRegistry.init(legacy);
     mcpSupervisor.init();
@@ -1360,11 +1422,12 @@ app.whenReady().then(async () => {
     console.log(`[Main] MCP broker ready at ${brokerEndpoint.url}`);
   } catch (err) {
     console.error("[Main] Failed to start MCP subsystem:", err);
-    // broker 启动失败时仍允许 gateway 起 (mhclaw.json 不会写入 broker entry,
-    // OpenClaw 会暂时看不到 MCP server, 但聊天主流程不阻塞)
+    // Even if broker startup fails we still launch the Gateway:
+    // mhclaw.json is not rewritten, OpenClaw temporarily won't see any
+    // MCP server, but the core chat path stays unblocked.
   }
 
-  // 自动启动内置 Gateway
+  // Spawn the embedded Gateway.
   try {
     await gatewayManager.start();
   } catch (err) {
@@ -1387,16 +1450,17 @@ app.on("window-all-closed", () => {
 app.on("before-quit", async () => {
   await stopWatching();
   await closeAllAuthorizedWatchers();
-  // 先停 broker (会拒绝新请求, 关已建 session)
+  // Stop the broker first — refuses new requests and closes existing sessions.
   try { await mcpBroker.stop(); } catch (err) { console.warn("[Main] mcpBroker.stop:", err); }
-  // 再停 supervisor (kill stdio 子进程, 清退避 timer)
+  // Then dispose the supervisor — kills stdio children and clears retry timers.
   try { await mcpSupervisor.dispose(); } catch (err) { console.warn("[Main] mcpSupervisor.dispose:", err); }
   await gatewayManager.stop();
   staticServer?.close();
 });
 
-// ---- 本地静态文件服务 ----
-// 打包后用 http://localhost 提供 dist 文件，让 WebSocket origin 为 HTTP
+// ---- Local static file server ----
+// Packaged builds serve dist over http://localhost so the WebSocket
+// origin is HTTP (Gateway rejects file:// origins).
 let staticServer: http.Server | null = null;
 
 const MIME_TYPES: Record<string, string> = {
@@ -1414,15 +1478,19 @@ const MIME_TYPES: Record<string, string> = {
 };
 
 /**
- * UI 静态服务固定端口。
+ * Fixed port for the UI static server.
  *
- * 为什么固定:`localStorage` 按 origin 隔离,端口变了 origin 就变,
- * 归档列表 / cron 历史 / 偏好全丢。之前用随机端口 + 持久化端口文件,
- * 但端口持久化不可靠(范围检查 / 文件被清等),还引入复杂度。固定就稳定。
+ * Why fixed: `localStorage` is partitioned by origin, so a changing port
+ * means a changing origin — task list / cron history / preferences would
+ * all be lost. We previously used a random port persisted to a file, but
+ * that turned out to be flaky (range checks, file getting cleared, etc.)
+ * and added complexity. A fixed port is simply more stable.
  *
- * 选 40790:跟 Gateway(40789)挨着,40000+ 高位段不会撞主流软件。
- * 单实例锁(app.requestSingleInstanceLock)保证不会自己跟自己抢端口。
- * 真被外部程序占了 → 报错退出,让用户自己处理。
+ * 40790 was chosen to sit right next to the Gateway (40789); the 40000+
+ * range avoids common conflicts. Single-instance lock
+ * (`app.requestSingleInstanceLock`) prevents two of our own processes
+ * from fighting over the port. If something external grabs it, we error
+ * out and let the user resolve the collision.
  */
 const UI_STATIC_PORT = 40790;
 
@@ -1434,14 +1502,14 @@ function startStaticServer(distDir: string): Promise<string> {
 
       const filePath = path.join(distDir, pathname);
 
-      // 安全检查：不允许路径穿越
+      // Safety check: refuse path traversal.
       if (!filePath.startsWith(distDir)) {
         res.writeHead(403);
         res.end();
         return;
       }
 
-      // 文件不存在则返回 index.html（SPA 路由支持）
+      // Fall back to index.html when the file doesn't exist (SPA routing).
       const target = fs.existsSync(filePath) ? filePath : path.join(distDir, "index.html");
       const ext = path.extname(target);
       const contentType = MIME_TYPES[ext] || "application/octet-stream";

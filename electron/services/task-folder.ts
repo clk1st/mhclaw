@@ -1,22 +1,24 @@
 /**
- * 任务目录(Task Folder)服务。
+ * Task folder service.
  *
- * 任务目录 = 每个任务(session)绑定的产出文件夹。
- * 结构(对标 WorkBuddy 的 .workbuddy/):
+ * A task folder is the per-session output directory bound to one chat
+ * session. The on-disk layout (modeled after WorkBuddy's `.workbuddy/`):
  *
  *   <task-folder>/
  *   ├── .mhclaw/
- *   │   ├── task.json          任务元数据
+ *   │   ├── task.json          task metadata
  *   │   └── memory/
- *   │       └── MEMORY.md      任务级记忆骨架(OpenClaw memory hook 写入)
- *   └── ...                    AI 产出的文件(HTML / Excel / PDF / 图...)
+ *   │       └── MEMORY.md      task-level memory skeleton
+ *   │                          (written to by OpenClaw memory hook)
+ *   └── ...                    AI-produced files (HTML / Excel / PDF / images / etc.)
  *
- * 三个入口:
- * - createBlankTask(): 在工作根下建 <YYYYMMDDHHMMSS>/ + .mhclaw/
- * - bindExternalFolder(absPath): 外部已有目录 → ensure .mhclaw/ 结构
- * - readTask(path) / writeTask(path, data): 操作 .mhclaw/task.json
+ * Three entry points:
+ *   - createBlankTask()         → create <YYYYMMDDHHMMSS>/ + .mhclaw/ under the work root
+ *   - bindExternalFolder(abs)   → ensure .mhclaw/ structure on a pre-existing dir
+ *   - readTask / writeTask      → operate on .mhclaw/task.json
  *
- * session ↔ task 的绑定关系单独存在 session-task.json(系统级)。
+ * The session ↔ task binding lives separately in `session-task.json`
+ * (system-wide).
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -30,15 +32,15 @@ import {
 const SESSION_TASK_MAP = "session-task.json";
 
 export interface TaskMeta {
-  /** 任务 ID(用时间戳或 UUID) */
+  /** Task ID (timestamp or UUID). */
   id: string;
-  /** 绑定的 sessionKey(OpenClaw 的) */
+  /** Bound sessionKey (OpenClaw's). */
   sessionKey: string;
-  /** 用户可见标题(默认从首条消息来) */
+  /** User-visible title (defaulted from the first message). */
   title: string;
   createdAt: number;
   lastActiveAt: number;
-  /** mhclaw 版本(跨版本兼容兜底) */
+  /** mhclaw version (cross-version safety net). */
   mhclawVersion: string;
 }
 
@@ -62,7 +64,7 @@ function timestampName(): string {
   );
 }
 
-/** 确保任务目录下的 .mhclaw/ 结构完整(幂等,已有则不动) */
+/** Make sure `.mhclaw/` is fully scaffolded under the task dir (idempotent). */
 export function ensureTaskMetadata(taskPath: string, init?: Partial<TaskMeta>): TaskMeta {
   const mhclawDir = path.join(taskPath, MHWORK_SUB);
   if (!fs.existsSync(mhclawDir)) fs.mkdirSync(mhclawDir, { recursive: true });
@@ -75,7 +77,7 @@ export function ensureTaskMetadata(taskPath: string, init?: Partial<TaskMeta>): 
 
   const taskJsonPath = path.join(mhclawDir, TASK_JSON);
   if (fs.existsSync(taskJsonPath)) {
-    // 已存在 → 读出来,合并可能的新字段
+    // Already exists → read and merge in any newly-introduced fields.
     try {
       const existing = JSON.parse(fs.readFileSync(taskJsonPath, "utf-8")) as TaskMeta;
       const merged: TaskMeta = {
@@ -85,7 +87,7 @@ export function ensureTaskMetadata(taskPath: string, init?: Partial<TaskMeta>): 
       fs.writeFileSync(taskJsonPath, JSON.stringify(merged, null, 2));
       return merged;
     } catch {
-      // corrupted,下面重建
+      // Corrupted — rebuild below.
     }
   }
 
@@ -102,7 +104,7 @@ export function ensureTaskMetadata(taskPath: string, init?: Partial<TaskMeta>): 
   return meta;
 }
 
-/** 读任务元数据(.mhclaw/task.json);不存在返回 null */
+/** Read task metadata (.mhclaw/task.json); returns null when absent. */
 export function readTaskMeta(taskPath: string): TaskMeta | null {
   const taskJsonPath = path.join(taskPath, MHWORK_SUB, TASK_JSON);
   if (!fs.existsSync(taskJsonPath)) return null;
@@ -118,7 +120,7 @@ export function writeTaskMeta(taskPath: string, meta: TaskMeta): void {
   fs.writeFileSync(taskJsonPath, JSON.stringify(meta, null, 2));
 }
 
-/** 在工作根下新建一个空任务目录,返回路径 */
+/** Create a fresh empty task directory under the work root and return its path. */
 export function createBlankTask(
   init?: Partial<TaskMeta>,
 ): { path: string; entry: OutputDirEntry; meta: TaskMeta } {
@@ -136,16 +138,16 @@ export function createBlankTask(
   return { path: taskPath, entry, meta };
 }
 
-/** 绑定一个外部已有目录:ensure .mhclaw 结构 + 加入索引 */
+/** Bind an existing external directory: ensure `.mhclaw/` + add to the index. */
 export function bindExternalFolder(
   absPath: string,
   init?: Partial<TaskMeta>,
 ): { path: string; entry: OutputDirEntry; meta: TaskMeta } {
   if (!fs.existsSync(absPath)) {
-    throw new Error(`目录不存在: ${absPath}`);
+    throw new Error(`Directory does not exist: ${absPath}`);
   }
   const stat = fs.statSync(absPath);
-  if (!stat.isDirectory()) throw new Error(`不是目录: ${absPath}`);
+  if (!stat.isDirectory()) throw new Error(`Not a directory: ${absPath}`);
 
   const meta = ensureTaskMetadata(absPath, init);
   const entry = upsertOutputDir({
@@ -158,7 +160,7 @@ export function bindExternalFolder(
 }
 
 // ============================================================
-// session ↔ task 绑定(系统级)
+// session ↔ task binding (system-wide)
 // ============================================================
 
 function sessionTaskMapPath(): string {
@@ -179,14 +181,14 @@ function saveSessionTaskMap(m: Record<string, string>) {
   fs.writeFileSync(sessionTaskMapPath(), JSON.stringify(m, null, 2));
 }
 
-/** 将 session 绑到任务目录(幂等) */
+/** Bind a session to a task directory (idempotent). */
 export function bindSessionToFolder(sessionKey: string, taskPath: string): void {
   if (!sessionKey || !taskPath) return;
   const map = loadSessionTaskMap();
   map[sessionKey] = taskPath;
   saveSessionTaskMap(map);
 
-  // 同步写到 task.json.sessionKey
+  // Mirror onto task.json.sessionKey.
   const meta = readTaskMeta(taskPath);
   if (meta) {
     meta.sessionKey = sessionKey;
@@ -194,28 +196,33 @@ export function bindSessionToFolder(sessionKey: string, taskPath: string): void 
     writeTaskMeta(taskPath, meta);
   }
 
-  // upsert 索引的 lastUsedAt
+  // Refresh lastUsedAt on the index entry.
   upsertOutputDir({ path: taskPath });
 }
 
 /**
- * 把 session-task 映射表里的 oldKey 迁移到 newKey。
- * 触发场景:客户端发送 sessionKey "session-123",Gateway 规范化成
- * "agent:main:session-123" 并在事件/sessions.list 里回传。首次拿到规范版 key 时
- * chat-store 调此 IPC,让磁盘映射跟上 —— 否则 getFolderForSession(newKey) 查不到。
+ * Migrate a session-task mapping from `oldKey` to `newKey`.
+ *
+ * Triggered when the client originally sends sessionKey like
+ * `session-123`, but the Gateway normalizes it to
+ * `agent:main:session-123` and reflects that back via events /
+ * sessions.list. The first time the canonical key is observed,
+ * chat-store calls this IPC so the on-disk map catches up — otherwise
+ * `getFolderForSession(newKey)` would miss.
  */
 export function remapSessionKey(oldKey: string, newKey: string): void {
   if (!oldKey || !newKey || oldKey === newKey) return;
   const map = loadSessionTaskMap();
   const taskPath = map[oldKey];
   if (!taskPath) return;
-  // newKey 已存在就不覆盖(保守策略:避免把别的 session 的绑定覆盖掉)
+  // If newKey is already mapped, leave it alone — conservative: never
+  // clobber an existing session binding.
   if (map[newKey]) return;
   map[newKey] = taskPath;
   delete map[oldKey];
   saveSessionTaskMap(map);
 
-  // 同步 task.json.sessionKey
+  // Sync the mirrored sessionKey on task.json.
   const meta = readTaskMeta(taskPath);
   if (meta) {
     meta.sessionKey = newKey;
@@ -224,14 +231,14 @@ export function remapSessionKey(oldKey: string, newKey: string): void {
   }
 }
 
-/** 获取 session 绑定的任务目录,未绑则 null */
+/** Look up the task directory bound to a session; null if unbound. */
 export function getFolderForSession(sessionKey: string): string | null {
   if (!sessionKey) return null;
   const map = loadSessionTaskMap();
   const p = map[sessionKey];
   if (!p) return null;
   if (!fs.existsSync(p)) {
-    // 目录被删了,清理映射
+    // Directory was deleted — clean up the stale mapping.
     delete map[sessionKey];
     saveSessionTaskMap(map);
     return null;

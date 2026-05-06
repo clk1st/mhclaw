@@ -83,7 +83,8 @@ export function HomePage() {
 
   const hasMessages = messages.length > 0;
 
-  // 从其他页面跳过来时,如果 store 里有 pendingInput,填进 Composer
+  // When navigated here from another page, prefill the Composer with
+  // the store's `pendingInput`.
   useEffect(() => {
     if (pendingInput) {
       setText(pendingInput);
@@ -91,7 +92,8 @@ export function HomePage() {
     }
   }, [pendingInput, clearPendingInput]);
 
-  // 发送拦截：未配模型 → 记住文本 + 打开 Setup Dialog（**不清空输入**）
+  // Send-time interception: no model configured → stash the text and
+  // open the Setup dialog (the input is intentionally NOT cleared).
   const handleSend = async (value: string) => {
     if (needsSetup) {
       setPendingAutoSend(value);
@@ -102,7 +104,8 @@ export function HomePage() {
     await sendMessage(value);
   };
 
-  // Setup 完成后自动补发之前被拦截的消息，用户不用再按一次
+  // After Setup completes, auto-resend the previously-intercepted
+  // message so the user doesn't have to press send again.
   useEffect(() => {
     if (!needsSetup && connected && pendingAutoSend) {
       const value = pendingAutoSend;
@@ -176,7 +179,7 @@ export function HomePage() {
           </div>
         </>
       ) : (
-        // Hero 模式:Composer 居中嵌入在 title 和 tabs 之间
+        // Hero mode: Composer is centered between the title and tabs.
         <Hero
           mode={mode}
           onModeChange={setMode}
@@ -198,7 +201,9 @@ export function HomePage() {
   );
 }
 
-/** Composer + 周边 banner(gateway 未连 / pending / loading 状态条) —— 单一入口,首页/对话通用 */
+/** Composer plus surrounding banners (gateway-disconnected /
+ *  pending / loading status). Single entry point — used by both
+ *  home and conversation views. */
 function ComposerDeck({
   text,
   setText,
@@ -244,8 +249,10 @@ function ComposerDeck({
 }
 
 /**
- * 切换到某个历史会话但 messages 仍空(loading/空会话/error)时,
- * 显示占位 + 诊断信息,避免出现"点了没反应"的错觉(原先会退回 Hero)。
+ * Shown when switching to a historical session whose messages
+ * haven't arrived yet (loading / empty / error). Displays a
+ * placeholder + diagnostic info so the UI doesn't feel "clicked but
+ * unresponsive" (it used to fall back to the Hero view).
  */
 function HistoryPlaceholder({
   diag,

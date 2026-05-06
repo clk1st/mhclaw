@@ -32,17 +32,20 @@ interface SkillsStatusResponse {
 }
 
 /**
- * 拉 skills.status,Gateway 连通时启用,10s 轮询。
+ * Fetch `skills.status`. Enabled when the Gateway is connected;
+ * polls every 10s.
  *
- * 为啥要把 normalize/filter 从 queryFn 搬到 useMemo:
- * Gateway 的 skills.status 返回很快(几百 ms),但 sidecars(主进程扫
- * SKILL.md frontmatter)慢一点。如果在 queryFn 里读 sidecars 缓存,
- * 第一次渲染时 sidecars 还没到,会用 `{}` 走完一遍,拿到英文原文;
- * 等下一次 refetch 才能纠正。用户体感就是"刚点进来英文,过几秒刷新
- * 成中文"。
+ * Why move normalize/filter out of queryFn into a useMemo:
+ * the Gateway's `skills.status` returns fast (a few hundred ms), but
+ * sidecars (main-process SKILL.md frontmatter scan) are a bit slower.
+ * If we read sidecars inside queryFn, the first render runs with `{}`
+ * and we end up showing the English original; the next refetch
+ * corrects it. The user perceives "English flashes, then snaps to
+ * Chinese a few seconds later".
  *
- * 改成 useMemo(raw, sidecars) 之后,任一 query 数据变化都会立刻重算,
- * sidecars 到了就立即切到中文,不用等 10s 轮询。
+ * Switching to `useMemo(raw, sidecars)` recomputes the moment either
+ * query updates — once sidecars arrive we switch to localized labels
+ * immediately, no 10s wait.
  */
 export function useSkills() {
   const activeId = useGatewayStore((s) => s.activeId);
@@ -70,12 +73,14 @@ export function useSkills() {
     if (!q.data) return undefined;
     const raw = Array.isArray(q.data.skills) ? q.data.skills : [];
 
-    // Gateway 的 skills.status 对非标准 skill(hub 装的 excel-xlsx /
-    // word-docx)返回 skillKey 是**显示名**("Word / DOCX"),跟
-    // sidecar 的 key(slug) 对不上。这里反查 sidecars:若 key 不在
-    // sidecars 里但等于某条 sidecar 的 mdName / displayName,就映射回
-    // slug,所有下游(sidecars[s.skillKey] / enabled toggle / SKILL.md
-    // 读取)自然对齐。
+    // For non-standard skills (hub installs like excel-xlsx /
+    // word-docx) the Gateway's `skills.status` returns the **display
+    // name** as `skillKey` (e.g. "Word / DOCX"), which doesn't match
+    // the sidecar's slug-keyed map. Reverse-lookup against sidecars:
+    // if `key` isn't a sidecar key but matches some sidecar's
+    // `mdName` / `displayName`, remap to that slug. Downstream
+    // (sidecars[s.skillKey] / enabled toggle / SKILL.md read) all
+    // align naturally afterward.
     const normalizeKey = (s: SkillStatusEntry): string => {
       const key = s.skillKey ?? s.name;
       if (key in sidecars) return key;
@@ -86,10 +91,11 @@ export function useSkills() {
       return key;
     };
 
-    // 两档覆盖(优先级:sidecar > curated meta):
-    // - sidecar:hub 装的 skill,用后台录入的 displayName / description
-    //   覆盖 SKILL.md 的原文(英文)。
-    // - curated:内置精选 skill 的中文 meta(skill-registry 维护)。
+    // Two-layer overlay (priority: sidecar > curated meta):
+    //   - sidecar: for hub-installed skills, override SKILL.md's
+    //     English with the back-end-curated displayName / description.
+    //   - curated: localized metadata for the built-in featured set
+    //     (maintained in skill-registry.ts).
     const filtered = raw
       .map((s) => ({ ...s, skillKey: normalizeKey(s) }))
       .filter((s) => shouldDisplaySkill(s.skillKey, s.bundled, s.source))
@@ -122,14 +128,14 @@ export function useSkills() {
   return { ...q, data } as typeof q;
 }
 
-/** 切换启用 */
+/** Toggle a skill's enabled flag. */
 export function useToggleSkill() {
   const getActiveClient = useGatewayStore((s) => s.getActiveClient);
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async ({ skillKey, enabled }: { skillKey: string; enabled: boolean }) => {
       const client = getActiveClient();
-      if (!client) throw new Error("Gateway 未连接");
+      if (!client) throw new Error("Gateway not connected");
       await client.request("skills.update", { skillKey, enabled });
     },
     onSuccess: () => {
@@ -139,9 +145,11 @@ export function useToggleSkill() {
 }
 
 /**
- * 配置 skill 的 apiKey/token(走 OpenClaw 官方 skills.entries.<key>.apiKey 机制)。
- * Gateway 下一个 agent turn 会自动按 skill frontmatter 的 primaryEnv 把 apiKey 注入
- * process.env,skill 立即可用,无需重启、无需重开对话。
+ * Configure a skill's apiKey/token via OpenClaw's
+ * `skills.entries.<key>.apiKey` mechanism. On the next agent turn,
+ * the Gateway automatically injects the apiKey into `process.env`
+ * according to the skill frontmatter's `primaryEnv` — the skill is
+ * usable immediately, no restart and no new conversation needed.
  */
 export function useSetSkillApiKey() {
   const getActiveClient = useGatewayStore((s) => s.getActiveClient);
@@ -149,7 +157,7 @@ export function useSetSkillApiKey() {
   return useMutation({
     mutationFn: async ({ skillKey, apiKey }: { skillKey: string; apiKey: string }) => {
       const client = getActiveClient();
-      if (!client) throw new Error("Gateway 未连接");
+      if (!client) throw new Error("Gateway not connected");
       await client.request("skills.update", { skillKey, apiKey });
     },
     onSuccess: () => {
@@ -158,7 +166,12 @@ export function useSetSkillApiKey() {
   });
 }
 
-/** 常见技能中文描述（OpenClaw 内置技能的英文描述替换） */
+/**
+ * Localized (Chinese) descriptions for OpenClaw built-in skills.
+ * Replaces the upstream English descriptions in the skill list UI.
+ * NOTE: this dictionary stays in Chinese until the broader UI
+ * internationalization pass.
+ */
 export const SKILL_DESC_ZH: Record<string, string> = {
   "skill-creator": "创建、编辑、审核技能：从零创建新技能，或改进已有 SKILL.md。",
   healthcheck: "主机安全加固与风险检查：安全审计、防火墙/SSH 加固、风险评估。",

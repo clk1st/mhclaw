@@ -1,17 +1,21 @@
 /**
- * 任务目录的轻量快照系统(非 git)。
+ * Lightweight snapshot system for task directories (not git).
  *
- * 每个任务目录下 `.mhclaw/baseline.json` 记录基线:
+ * Each task directory has a baseline at `.mhclaw/baseline.json`:
  *   {
  *     createdAt: number,
  *     entries: [{ rel, size, mtime, textHash? }]
  *   }
  *
- * 文本文件(≤256KB、可识别后缀)额外把原文复制到
- * `.mhclaw/baseline-text/<sha1(rel)>.txt`,给 ChangesTab 做 before/after 对比。
+ * For text files (≤256KB, with a recognized extension) we additionally
+ * copy the original content to
+ * `.mhclaw/baseline-text/<sha1(rel)>.txt`, enabling the ChangesTab's
+ * before/after diff view.
  *
- * 与基线比较只看 size / mtime。OpenClaw 写文件一般 mtime 会变;
- * 对边界情况(AI 原样覆盖)可接受漏报 —— 日常足够。
+ * Comparison against the baseline only checks size and mtime. OpenClaw
+ * writes files such that mtime virtually always changes; we accept the
+ * edge case where the AI writes the same bytes (false negative) —
+ * good enough for daily usage.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -62,9 +66,9 @@ export interface ChangeEntry {
   kind: ChangeKind;
   size?: number;
   mtime?: number;
-  /** 是否有基线文本(能做文本对比) */
+  /** Whether the baseline kept a text snapshot (enables diff). */
   hasBaselineText?: boolean;
-  /** 是否当前是文本(能做文本对比) */
+  /** Whether the current file is text (enables diff). */
   isText?: boolean;
 }
 
@@ -116,7 +120,7 @@ function walk(root: string, cb: (abs: string, rel: string, stat: fs.Stats) => vo
   }
 }
 
-/** 扫描任务目录,生成 BaselineEntry 数组(不写盘) */
+/** Walk the task directory and produce BaselineEntry[]; doesn't persist. */
 export function scanEntries(taskPath: string): BaselineEntry[] {
   const entries: BaselineEntry[] = [];
   walk(taskPath, (_abs, rel, st) => {
@@ -129,7 +133,7 @@ export function scanEntries(taskPath: string): BaselineEntry[] {
   return entries;
 }
 
-/** 建立基线。幂等,覆盖写。 */
+/** Capture a baseline. Idempotent — overwrites the previous one. */
 export function captureBaseline(taskPath: string): Baseline {
   const mhclawDir = path.join(taskPath, MHWORK_SUB);
   if (!fs.existsSync(mhclawDir)) fs.mkdirSync(mhclawDir, { recursive: true });
@@ -161,13 +165,13 @@ export function captureBaseline(taskPath: string): Baseline {
   return baseline;
 }
 
-/** 确保基线存在,不存在就建一个(首次用) */
+/** Ensure a baseline exists; create one on first call. */
 export function ensureBaseline(taskPath: string): Baseline {
   if (hasBaseline(taskPath)) {
     try {
       return JSON.parse(fs.readFileSync(baselinePath(taskPath), "utf-8")) as Baseline;
     } catch {
-      // 损坏,重建
+      // Corrupted — rebuild.
     }
   }
   return captureBaseline(taskPath);
@@ -182,7 +186,7 @@ export function readBaseline(taskPath: string): Baseline | null {
   }
 }
 
-/** 对比当前 vs 基线,返回变更清单 */
+/** Diff current state vs the baseline; returns a change list. */
 export function computeDiff(taskPath: string): ChangeEntry[] {
   const baseline = readBaseline(taskPath);
   if (!baseline) return [];
@@ -220,7 +224,7 @@ export function computeDiff(taskPath: string): ChangeEntry[] {
   return out.sort((a, b) => a.rel.localeCompare(b.rel));
 }
 
-/** 读取基线里的文本文件内容;不存在或非文本返回 null */
+/** Read the baseline text for `rel`; null if missing or non-text. */
 export function readBaselineText(taskPath: string, rel: string): string | null {
   const baseline = readBaseline(taskPath);
   if (!baseline) return null;
@@ -234,7 +238,7 @@ export function readBaselineText(taskPath: string, rel: string): string | null {
   }
 }
 
-/** 读取当前工作区里的文本(仅文本类型且大小合理) */
+/** Read the current text content (text-typed files of reasonable size only). */
 export function readCurrentText(taskPath: string, rel: string): string | null {
   const abs = path.join(taskPath, rel);
   let st: fs.Stats;

@@ -1,19 +1,23 @@
 /**
- * mhclaw 自定义协议:
+ * mhclaw custom protocols.
  *
  *   mhclaw-workspace://fs/<encoded-sessionKey>/<rel-path>
- *     - 解析:通过 session→task folder 映射找到 base,再拼 rel
- *     - 用途:RightPanel 预览本任务的产出文件
- *     - 不用 host 放 sessionKey:OpenClaw sessionKey 含 ":"(如 agent:main:session-X),
- *       encodeURIComponent 后 "%3A" 在 URL host 段被 Chromium URL parser 拒绝,
- *       必须放到 pathname 里才合法。
+ *     - Resolution: look up the task folder via session→task mapping,
+ *       then join with `rel`.
+ *     - Use: RightPanel previewing this task's output files.
+ *     - Why sessionKey doesn't go in the URL host: OpenClaw session
+ *       keys contain `:` (e.g. `agent:main:session-X`). After
+ *       encodeURIComponent, `%3A` in a URL host segment is rejected by
+ *       the Chromium URL parser; it must live in the pathname.
  *
- *   mhclaw-authorized://fs/<percent-encoded-abs-path>
- *     - 解析:解码绝对路径 → 走白名单校验 → 读文件
- *     - 用途:预览授权目录里的文件(用户明确加过白名单的)
+ *   mhclaw-authorized://fs/<percent-encoded-absolute-path>
+ *     - Resolution: decode the absolute path → run authorized-dirs
+ *       check → read the file.
+ *     - Use: previewing files inside user-authorized directories.
  *
- * 两个协议都用 privileged 注册:secure + standard + supportFetchAPI + stream,
- * iframe / <img> / fetch 都能用。
+ * Both schemes are registered with the privileged set
+ * (secure + standard + supportFetchAPI + stream + cors), so iframe /
+ * <img> / fetch all work.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -24,7 +28,7 @@ import { isAuthorized } from "./authorized-dirs.js";
 export const SCHEME_WORKSPACE = "mhclaw-workspace";
 export const SCHEME_AUTHORIZED = "mhclaw-authorized";
 
-/** 必须在 app.whenReady() 之前调用 */
+/** Must be called BEFORE app.whenReady(). */
 export function registerSchemes() {
   protocol.registerSchemesAsPrivileged([
     {
@@ -50,7 +54,7 @@ export function registerSchemes() {
   ]);
 }
 
-/** app.whenReady() 之后调用 */
+/** Called AFTER app.whenReady(). */
 export function registerHandlers() {
   protocol.handle(SCHEME_WORKSPACE, async (req) => {
     try {
@@ -58,8 +62,8 @@ export function registerHandlers() {
       if (url.hostname !== "fs") {
         return new Response("invalid host", { status: 400 });
       }
-      // pathname 形如 "/<encoded-sessionKey>/<rel-path>...";
-      // 先切出第一段作为 session,剩下拼成 rel
+      // pathname looks like "/<encoded-sessionKey>/<rel-path>...".
+      // Split the first segment as the session; join the rest as rel.
       const parts = url.pathname.replace(/^\/+/, "").split("/");
       const sessionKey = decodeURIComponent(parts.shift() ?? "");
       const rel = parts.map(decodeURIComponent).join("/");
@@ -78,7 +82,7 @@ export function registerHandlers() {
   protocol.handle(SCHEME_AUTHORIZED, async (req) => {
     try {
       const url = new URL(req.url);
-      // host 固定用 "fs",pathname 即 /<encoded-abs-path>
+      // host is fixed to "fs"; pathname is /<encoded-abs-path>.
       if (url.hostname !== "fs") {
         return new Response("invalid host", { status: 400 });
       }
@@ -98,9 +102,10 @@ export function registerHandlers() {
 }
 
 /**
- * 读文件并返回 Response。
- * @param filePath 目标文件绝对路径
- * @param confine  若提供,则要求 filePath 必须在 confine 下(防 ../ 穿越)
+ * Read a file and return the Response.
+ * @param filePath Absolute path to the file.
+ * @param confine  If provided, `filePath` must be under `confine`
+ *                 (defends against `../` traversal).
  */
 async function serveFile(filePath: string, confine?: string): Promise<Response> {
   const resolved = path.resolve(filePath);
@@ -118,7 +123,7 @@ async function serveFile(filePath: string, confine?: string): Promise<Response> 
     return new Response("not found", { status: 404 });
   }
   if (stat.isDirectory()) {
-    // 目录 → 尝试 index.html
+    // Directory → try index.html.
     const idx = path.join(resolved, "index.html");
     if (fs.existsSync(idx)) return serveFile(idx, confine);
     return new Response("is directory", { status: 404 });

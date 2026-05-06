@@ -1,12 +1,12 @@
 import { contextBridge, ipcRenderer } from "electron";
 
-/** 暴露给渲染进程的 API */
+/** API surface exposed to the renderer. */
 contextBridge.exposeInMainWorld("cjtClaw", {
-  /** 平台标识 */
+  /** Platform tag. */
   platform: process.platform as "darwin" | "win32" | "linux",
   isElectron: true,
 
-  /** 内置 Gateway 控制 */
+  /** Embedded Gateway control. */
   gateway: {
     start: () => ipcRenderer.invoke("gateway:start"),
     stop: () => ipcRenderer.invoke("gateway:stop"),
@@ -19,14 +19,14 @@ contextBridge.exposeInMainWorld("cjtClaw", {
     },
   },
 
-  /** 窗口控制 */
+  /** Window control. */
   window: {
     minimize: () => ipcRenderer.invoke("window:minimize"),
     maximize: () => ipcRenderer.invoke("window:maximize"),
     close: () => ipcRenderer.invoke("window:close"),
   },
 
-  /** 技能文件操作 */
+  /** Skill file operations. */
   skills: {
     fetchFromGithub: (url: string) =>
       ipcRenderer.invoke("skills:fetchFromGithub", url) as Promise<{ name: string; content: string }>,
@@ -38,14 +38,14 @@ contextBridge.exposeInMainWorld("cjtClaw", {
       ipcRenderer.invoke("skills:installZip", zipPath) as Promise<{ name: string; path: string }>,
     deleteCustomSkill: (name: string) =>
       ipcRenderer.invoke("skills:deleteCustomSkill", name) as Promise<void>,
-    /** 读取 skill 的 SKILL.md 源码（workspace > managed > bundled） */
+    /** Read a skill's SKILL.md source (priority: workspace > managed > bundled). */
     getMd: (name: string) =>
       ipcRenderer.invoke("skills:getMd", name) as Promise<{
         source: string;
         path: string;
         content: string;
       }>,
-    /** 从 URL 下载 skill zip 并解压到 workspace/skills;meta 会写成 sidecar */
+    /** Download a skill zip from URL into workspace/skills; meta becomes a sidecar. */
     installFromUrl: (args: {
       url: string;
       slug: string;
@@ -62,7 +62,7 @@ contextBridge.exposeInMainWorld("cjtClaw", {
         path: string;
         size: number;
       }>,
-    /** 批量读所有已装 skill 的 hub sidecar */
+    /** Batch-read every installed skill's hub sidecar. */
     readHubSidecars: () =>
       ipcRenderer.invoke("skills:readHubSidecars") as Promise<
         Record<
@@ -81,7 +81,7 @@ contextBridge.exposeInMainWorld("cjtClaw", {
       >,
   },
 
-  /** 工作根(用户选定的任务产出父目录) */
+  /** Work root (parent directory the user picked for task output). */
   workRoot: {
     get: () => ipcRenderer.invoke("workRoot:get") as Promise<{
       path: string;
@@ -102,7 +102,7 @@ contextBridge.exposeInMainWorld("cjtClaw", {
       } | null>,
   },
 
-  /** 任务目录 */
+  /** Task directories. */
   taskFolder: {
     listRecent: () =>
       ipcRenderer.invoke("taskFolder:listRecent") as Promise<
@@ -166,7 +166,7 @@ contextBridge.exposeInMainWorld("cjtClaw", {
       }>,
   },
 
-  /** 产物清单(embed 持久化 + fs 成品文件自动扫) */
+  /** Artifacts (persisted embeds + auto-discovered output files on the FS). */
   artifacts: {
     list: (sessionKey: string) =>
       ipcRenderer.invoke("artifacts:list", sessionKey) as Promise<
@@ -195,7 +195,7 @@ contextBridge.exposeInMainWorld("cjtClaw", {
     }) => ipcRenderer.invoke("artifacts:add", args) as Promise<unknown>,
   },
 
-  /** 文件系统(任务目录内) */
+  /** File system (within a task directory). */
   fs: {
     listChildren: (args: { taskPath: string; rel: string }) =>
       ipcRenderer.invoke("fs:listChildren", args) as Promise<
@@ -215,7 +215,7 @@ contextBridge.exposeInMainWorld("cjtClaw", {
       ipcRenderer.invoke("fs:deleteFile", args) as Promise<{ ok: true }>,
   },
 
-  /** 快照(变更基线) */
+  /** Snapshots (change-tracking baseline). */
   snapshot: {
     has: (taskPath: string) =>
       ipcRenderer.invoke("snapshot:has", taskPath) as Promise<boolean>,
@@ -241,7 +241,7 @@ contextBridge.exposeInMainWorld("cjtClaw", {
       >,
   },
 
-  /** 文件监听(当前任务目录) */
+  /** File watcher (current task directory). */
   fileWatcher: {
     start: (taskPath: string) =>
       ipcRenderer.invoke("fileWatcher:start", taskPath) as Promise<{ ok: true }>,
@@ -261,7 +261,7 @@ contextBridge.exposeInMainWorld("cjtClaw", {
     },
   },
 
-  /** 系统级设置 / 授权(macOS 为主) */
+  /** System-level settings / permissions (mostly macOS). */
   system: {
     getPermissions: () =>
       ipcRenderer.invoke("system:getPermissions") as Promise<{
@@ -284,7 +284,7 @@ contextBridge.exposeInMainWorld("cjtClaw", {
       ipcRenderer.invoke("system:openExternal", url) as Promise<{ ok: boolean }>,
   },
 
-  /** mhclaw:// deep link 订阅(登录授权回调等) */
+  /** mhclaw:// deep-link subscription (login-callback, etc.). */
   auth: {
     onDeepLink: (callback: (url: string) => void) => {
       const handler = (_e: unknown, url: string) => callback(url);
@@ -293,7 +293,7 @@ contextBridge.exposeInMainWorld("cjtClaw", {
     },
   },
 
-  /** 微信渠道扫码登录(走 openclaw CLI 子进程) */
+  /** WeChat channel QR-login (runs through the openclaw CLI subprocess). */
   weixinLogin: {
     start: () =>
       ipcRenderer.invoke("weixin:login:start") as Promise<{
@@ -319,7 +319,7 @@ contextBridge.exposeInMainWorld("cjtClaw", {
     },
   },
 
-  /** Preview 可用性探测(主进程查 fs 状态) */
+  /** Preview availability probe (main process checks fs state). */
   previewProbe: {
     checkFile: (args: { url: string }) =>
       ipcRenderer.invoke("previewProbe:checkFile", args) as Promise<{
@@ -330,7 +330,7 @@ contextBridge.exposeInMainWorld("cjtClaw", {
       }>,
   },
 
-  /** MCP 探测(主进程自建 MCP client,不走 gateway) */
+  /** MCP probe (main process runs its own MCP client; bypasses gateway). */
   mcpProbe: {
     one: (args: {
       config: Record<string, unknown>;
@@ -360,7 +360,7 @@ contextBridge.exposeInMainWorld("cjtClaw", {
       >,
   },
 
-  /** MCP registry —— 用户 MCP 配置真实来源 (~/.mhclaw/mcp-registry.json) */
+  /** MCP registry — source of truth for user MCP config (~/.mhclaw/mcp-registry.json). */
   mcpRegistry: {
     list: () =>
       ipcRenderer.invoke("mcpRegistry:list") as Promise<
@@ -378,7 +378,7 @@ contextBridge.exposeInMainWorld("cjtClaw", {
       }>,
   },
 
-  /** MCP supervisor —— 健康状态 + last-known-good 数据来源 */
+  /** MCP supervisor — source of health state + last-known-good data. */
   mcpSupervisor: {
     status: () =>
       ipcRenderer.invoke("mcpSupervisor:status") as Promise<
@@ -422,7 +422,7 @@ contextBridge.exposeInMainWorld("cjtClaw", {
     },
   },
 
-  /** MCP broker —— per-call snapshot + endpoint 信息 */
+  /** MCP broker — per-call snapshot + endpoint info. */
   mcpBroker: {
     snapshotTail: (opts?: { limit?: number; brokerSessionId?: string }) =>
       ipcRenderer.invoke("mcpBroker:snapshotTail", opts ?? {}) as Promise<
@@ -443,7 +443,7 @@ contextBridge.exposeInMainWorld("cjtClaw", {
       } | null>,
   },
 
-  /** 授权目录(白名单) */
+  /** Authorized directories (whitelist). */
   authorizedDirs: {
     list: () =>
       ipcRenderer.invoke("authorizedDirs:list") as Promise<

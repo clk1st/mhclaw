@@ -1,24 +1,31 @@
 /**
- * AGENTS.md contribution 注入服务。
+ * AGENTS.md contribution injection service.
  *
- * mhclaw 在 <agent-workspace>/AGENTS.md 末尾维护一段 marker 包裹的 contribution,
- * 告诉 agent mhclaw UI 的约定协议:
+ * mhclaw maintains a marker-wrapped contribution at the end of
+ * `<agent-workspace>/AGENTS.md` which teaches the agent about mhclaw's
+ * UI protocol conventions:
  *
- *   [embed ref url title /]           → 富内容预览按钮(OpenClaw Rich Output Protocol 原生)
- *   [Plan mode] / [Ask mode]          → 执行模式前缀
- *   [output_dir: /path]               → 本次任务产出目录声明
+ *   [embed ref url title /]           → rich-output preview buttons
+ *                                       (OpenClaw Rich Output Protocol)
+ *   [Plan mode] / [Ask mode]          → execution-mode prefixes
+ *   [output_dir: /path]               → declared output directory
  *
- * 每次 mhclaw 启动 ensure 一次:
- * - AGENTS.md 不存在 → 创建一个含 contribution 的最小版本
- * - 存在但没 marker 段 → 末尾 append
- * - 存在且 marker 段内容过期(版本号不匹配) → 整段替换,保留外部内容
+ * Run on every mhclaw startup (idempotent):
+ *   - AGENTS.md missing → create a minimal version containing the contribution
+ *   - exists, no marker block → append to the end
+ *   - exists with stale marker block (version mismatch) → replace just the
+ *     marker block, preserving everything outside it
+ *
+ * NOTE: the CONTRIBUTION string below is intentionally Chinese — it's
+ * runtime guidance addressed to the AI agent, not source comments. Will
+ * be properly internationalized later alongside other UI strings.
  */
 import fs from "node:fs";
 import path from "node:path";
 
 const BEGIN = "<!-- MHWORK-CONTRIBUTION-BEGIN do-not-edit-this-section-manually -->";
 const END = "<!-- MHWORK-CONTRIBUTION-END -->";
-const VERSION_TAG = "v7"; // 升级约定时改 v8,触发重写
+const VERSION_TAG = "v7"; // bump (e.g. to v8) to force a rewrite on next launch
 
 const CONTRIBUTION = `${BEGIN}
 <!-- ${VERSION_TAG} -->
@@ -134,8 +141,9 @@ OpenClaw 作为 npm 依赖内嵌在 mhclaw 里,**系统 PATH 里没有 \`opencla
 ${END}`;
 
 /**
- * Ensure AGENTS.md 里有最新版本的 mhclaw contribution 段。
- * @param agentWorkspace agent workspace 路径(~/.mhclaw/workspace)
+ * Ensure AGENTS.md contains the current version of mhclaw's contribution
+ * block.
+ * @param agentWorkspace agent workspace path (e.g. ~/.mhclaw/workspace)
  */
 export function ensureAgentsMdContribution(agentWorkspace: string): void {
   if (!fs.existsSync(agentWorkspace)) {
@@ -155,7 +163,8 @@ export function ensureAgentsMdContribution(agentWorkspace: string): void {
   const beginIdx = existing.indexOf(BEGIN);
   const endIdx = existing.indexOf(END);
 
-  // 版本检测:marker 段内的 <!-- vX --> 跟当前不一致则重写
+  // Version check: rewrite if the inline `<!-- vX -->` marker doesn't
+  // match the current VERSION_TAG.
   const expectedVersionLine = `<!-- ${VERSION_TAG} -->`;
   const hasCurrentVersion =
     beginIdx !== -1 &&
@@ -163,21 +172,23 @@ export function ensureAgentsMdContribution(agentWorkspace: string): void {
     existing.slice(beginIdx, endIdx).includes(expectedVersionLine);
 
   if (hasCurrentVersion) {
-    // 已是最新,跳过
+    // Already at the current version — nothing to do.
     return;
   }
 
   let next: string;
   if (beginIdx !== -1 && endIdx !== -1 && endIdx > beginIdx) {
-    // 替换旧 marker 段
+    // Replace just the stale marker block.
     const before = existing.slice(0, beginIdx).replace(/\s+$/, "");
     const after = existing.slice(endIdx + END.length).replace(/^\s+/, "");
     next = [before, CONTRIBUTION, after].filter(Boolean).join("\n\n") + "\n";
   } else if (existing.trim()) {
-    // 追加到末尾
+    // Append to the end (kept user content intact).
     next = existing.replace(/\s+$/, "") + "\n\n" + CONTRIBUTION + "\n";
   } else {
-    // 文件为空或不存在 → 创建最小版本
+    // File is empty or missing — create a minimal version. The header
+    // text is intentionally in Chinese: it's read by the AI agent at
+    // runtime alongside the contribution block (see top-of-file note).
     next =
       `# Agent 指令\n\n这是 agent 的操作指南。mhclaw 维护下方 contribution 段,其余内容由你控制。\n\n` +
       CONTRIBUTION +

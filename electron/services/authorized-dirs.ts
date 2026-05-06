@@ -1,20 +1,27 @@
 /**
- * 授权目录(Authorized Dirs)服务。
+ * Authorized-directories service.
  *
- * 用户可以把特定目录加到白名单,让 AI / 预览层访问 ——
- * 通过 mhclaw-authorized:// 协议时,只有命中白名单前缀的路径才会被服务出去。
+ * Users can add specific directories to a whitelist so the AI / preview
+ * layer is allowed to read from them. Requests via the
+ * `mhclaw-authorized://` protocol are only served when the path falls
+ * within a whitelisted prefix.
  *
- * 存储: ~/.mhclaw/authorized-dirs.json
+ * Storage: `~/.mhclaw/authorized-dirs.json`.
  *
- * 白名单的语义:
- * - 包含关系: 目录 `/foo/bar` 授权后,`/foo/bar/x.html` 可访问;`/foo` 不可访问
- * - 符号链接: 解析到 realpath 再匹配(防绕过)
- * - 不授权危险路径: / 、/Users 、/Users/<name> 根 —— 太宽,拒写
+ * Whitelist semantics:
+ *   - Prefix containment: with `/foo/bar` authorized, `/foo/bar/x.html`
+ *     is reachable but `/foo` is not.
+ *   - Symlinks: matched against `realpath` to prevent bypass.
+ *   - Refused-by-default: `/`, `/Users`, `/Users/<name>`, etc. — too
+ *     broad, never authorized.
  *
- * 内置白名单:app 自己的 state 目录(~/.mhclaw/)—— OpenClaw 的 main/claw agent
- * 默认把 USER.md / MEMORY.md 之类写在 `~/.mhclaw/workspace/`,用户装 app 时就已经
- * 同意了 app 访问 state 目录,不应该再要求"显式授权"。不写入 authorized-dirs.json,
- * UI 列表里也不出现,只在 isAuthorized 判断时兜底放行。
+ * Built-in whitelist: the app's own state directory (~/.mhclaw/). The
+ * default OpenClaw `main` / `claw` agents write USER.md / MEMORY.md to
+ * `~/.mhclaw/workspace/`; the user has already implicitly granted the
+ * app access to its state dir by installing it, so we shouldn't keep
+ * asking. The built-in entry isn't written to authorized-dirs.json and
+ * doesn't appear in the UI list — `isAuthorized()` just allows it as a
+ * fallback.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -66,13 +73,13 @@ export function listAuthorizedDirs(): AuthorizedDir[] {
 }
 
 export function addAuthorizedDir(absPath: string, note?: string): AuthorizedDir {
-  if (!fs.existsSync(absPath)) throw new Error(`目录不存在: ${absPath}`);
+  if (!fs.existsSync(absPath)) throw new Error(`Directory does not exist: ${absPath}`);
   const stat = fs.statSync(absPath);
-  if (!stat.isDirectory()) throw new Error(`不是目录: ${absPath}`);
+  if (!stat.isDirectory()) throw new Error(`Not a directory: ${absPath}`);
 
-  // realpath 防符号链接绕过
+  // Resolve realpath to defeat symlink-based bypass.
   const real = fs.realpathSync(absPath);
-  if (isDangerous(real)) throw new Error(`不允许授权这个目录: ${real}`);
+  if (isDangerous(real)) throw new Error(`This directory cannot be authorized: ${real}`);
 
   const list = load();
   const existing = list.find((e) => e.path === real);
@@ -98,8 +105,9 @@ export function removeAuthorizedDir(absPath: string): void {
 }
 
 /**
- * 返回内置白名单 —— app 自己的 state 目录,永远放行。
- * 懒解析 realpath,结果缓存一次就够(state 目录在整个 app 生命周期内不会变)。
+ * Return the built-in whitelist (the app's state directory) — always
+ * authorized. The realpath is resolved lazily and cached once: the
+ * state dir doesn't move during the app lifetime.
  */
 let builtInCache: string[] | null = null;
 function getBuiltInAuthorizedDirs(): string[] {
@@ -108,7 +116,7 @@ function getBuiltInAuthorizedDirs(): string[] {
   const resolved: string[] = [];
   for (const p of candidates) {
     try {
-      // state 目录可能还没建,先 resolve 再试着 realpath
+      // The state dir may not exist yet — try resolve, then realpath.
       const abs = path.resolve(p);
       resolved.push(fs.existsSync(abs) ? fs.realpathSync(abs) : abs);
     } catch {
@@ -119,7 +127,7 @@ function getBuiltInAuthorizedDirs(): string[] {
   return builtInCache;
 }
 
-/** 判断 target 是否在任一授权目录内(严格前缀 + realpath) */
+/** Is `target` inside any authorized directory? (strict prefix + realpath) */
 export function isAuthorized(target: string): boolean {
   let real: string;
   try {
@@ -127,12 +135,12 @@ export function isAuthorized(target: string): boolean {
   } catch {
     real = path.resolve(target);
   }
-  // 先看内置白名单(state 目录)
+  // Built-in whitelist (state dir) first.
   for (const base of getBuiltInAuthorizedDirs()) {
     const baseWithSep = base.endsWith(path.sep) ? base : base + path.sep;
     if (real === base || real.startsWith(baseWithSep)) return true;
   }
-  // 再看用户授权的目录
+  // Then user-authorized directories.
   const list = load();
   for (const e of list) {
     const base = e.path.endsWith(path.sep) ? e.path : e.path + path.sep;

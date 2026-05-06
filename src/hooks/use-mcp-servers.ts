@@ -3,10 +3,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { tryUnwrapMcpRemote } from "@/lib/mcp-wrapper";
 
 /**
- * MCP server 配置(联合类型,按字段判断 transport):
- * - 含 `command` → stdio
- * - 含 `url` 且无 `transport` 或 `transport === "sse"` → HTTP / SSE
- * - 含 `url` 且 `transport === "streamable-http"` → 双向 HTTP 流
+ * MCP server config (union type — transport is inferred per field):
+ *   - has `command` → stdio
+ *   - has `url`, `transport === "sse"` (or unset) → HTTP / SSE
+ *   - has `url`, `transport === "streamable-http"` → bidirectional HTTP stream
  */
 export interface McpServerStdio {
   command: string;
@@ -31,9 +31,10 @@ export type McpServerConfig = McpServerStdio | McpServerHttp;
 export type McpTransportKind = "stdio" | "sse" | "streamable-http";
 
 /**
- * 识别一条 server 的传输方式。
- * 有 command → stdio,否则看 transport 字段,默认 streamable-http。
- * 历史数据(mcp-remote wrapped)由 normalizeStoredConfig 统一 unwrap 后再进来。
+ * Detect a server's transport.
+ * `command` present → stdio; otherwise look at the `transport` field
+ * (defaults to streamable-http). Legacy mcp-remote-wrapped entries
+ * are unwrapped by `normalizeStoredConfig` before reaching here.
  */
 export function detectTransport(s: McpServerConfig): McpTransportKind {
   const stdio = s as McpServerStdio;
@@ -43,15 +44,17 @@ export function detectTransport(s: McpServerConfig): McpTransportKind {
 }
 
 /**
- * 读存储时的归一化:老版本把 HTTP MCP 包成 stdio+mcp-remote 存(防 SDK
- * SSE header bug),新版本 OpenClaw 原生 Streamable HTTP 已能带 headers,
- * 不再需要 wrap。读时把老 wrap 数据还原成 { url, headers, transport } 形,
- * 用户下次编辑保存即完成迁移。
+ * Read-time normalization. Older versions stored HTTP MCP servers
+ * wrapped as stdio + mcp-remote (workaround for an SDK SSE-header
+ * bug). Modern OpenClaw's native Streamable HTTP handles headers
+ * directly — no wrapping needed. On read we restore the wrapped data
+ * to its `{ url, headers, transport }` shape; the user's next
+ * edit-save round-trip then commits the migration to disk.
  */
 function normalizeStoredConfig(config: McpServerConfig): McpServerConfig {
   const unwrapped = tryUnwrapMcpRemote(config);
   if (!unwrapped) return config;
-  // disabled 字段要保留
+  // Preserve the `disabled` field across the unwrap.
   const disabled = (config as { disabled?: boolean }).disabled;
   const out: McpServerHttp = {
     url: unwrapped.url,
@@ -69,23 +72,31 @@ export interface McpServerEntry {
 }
 
 /**
- * 改造说明 (broker 上线后):
- *  - 数据来源不再是 OpenClaw `config.get` 的 mcp.servers
- *  - 改成走主进程 IPC `mcpRegistry.*` (~/.mhclaw/mcp-registry.json)
- *  - 这样不会撞 OpenClaw control-plane 3/60s 限流
- *  - 健康状态走 mcpSupervisor IPC, 跟 catalog 解耦
+ * Refactor notes (post-broker):
+ *   - Data source is no longer OpenClaw's `config.get` -> `mcp.servers`.
+ *   - It now goes through the main-process IPC `mcpRegistry.*`
+ *     (~/.mhclaw/mcp-registry.json).
+ *   - This avoids OpenClaw's control-plane 3/60s rate limit.
+ *   - Health state flows through `mcpSupervisor` IPC, decoupled from
+ *     the catalog.
  */
 
 /**
- * MCP server 的"探测结果"—— 连接是否成功 + 暴露的 tool 列表 + 错误原因。
+ * Probe result for one MCP server: connection success +
+ * exposed tool list + error reason.
  *
- * 为什么不走 gateway:OpenClaw gateway 没有任何 mcp.* RPC,tools.catalog /
- * tools.effective 都不含 MCP server 的 tool(只含 core + plugin + channel)。
- * gateway 层的 MCP 能力是黑盒 —— agent 能调用 MCP tool,但 UI 层无从观测。
+ * Why not go through the gateway? OpenClaw's gateway has no `mcp.*`
+ * RPC. `tools.catalog` / `tools.effective` don't include
+ * MCP-server-provided tools (just core + plugin + channel tools), and
+ * the gateway exposes no connection-status query. From the gateway's
+ * perspective MCP is a black box — the agent can call MCP tools but
+ * the UI can't observe them.
  *
- * 我们对标 WorkBuddy 的做法:在 Electron 主进程里自建轻量 MCP client,
- * 直接 spawn stdio + JSON-RPC 拉 tools/list,拿完即关。跟 gateway 并行,
- * 不影响 agent 的 MCP 执行链路。具体实现见 electron/services/mcp-probe.ts。
+ * Mirroring WorkBuddy's approach, mhclaw runs its own lightweight MCP
+ * client inside the Electron main process: spawn stdio + send JSON-RPC
+ * `tools/list`, then close. Runs in parallel with the gateway, doesn't
+ * affect the agent's actual MCP execution path. Implementation lives
+ * at `electron/services/mcp-probe.ts`.
  */
 export interface McpServerToolSummary {
   name: string;
@@ -98,11 +109,12 @@ export interface McpServerProbeInfo {
   durationMs: number;
 }
 /**
- * 单条 MCP server 的探测 hook —— 每条 server 一个独立 query,
- * 用户点"刷新"只重探这一条,不影响其他 server(也不影响 AI 对话)。
+ * Single-server probe hook — each server has its own query, so a
+ * user "refresh" only re-probes that one server (and doesn't
+ * interfere with the AI conversation either).
  *
- * queryKey 带 configKey:配置改了(比如编辑了 URL/headers)会自动重探,
- * 不改配置时保持缓存命中。
+ * `queryKey` carries `configKey`: a config change (URL / headers /
+ * etc.) auto-triggers a re-probe; unchanged configs keep cache hits.
  */
 export function useMcpServerProbe(
   name: string,
@@ -110,7 +122,8 @@ export function useMcpServerProbe(
   enabled: boolean,
 ) {
   const probeApi = window.cjtClaw?.mcpProbe;
-  // 把配置序列化进 queryKey,配置变化(编辑了 URL/headers 等)自动触发重探
+  // Fold config into the queryKey so any config change (URL,
+  // headers, etc.) automatically triggers a re-probe.
   const configKey = JSON.stringify(config);
 
   return useQuery({
@@ -120,7 +133,7 @@ export function useMcpServerProbe(
         return {
           ok: false,
           tools: [],
-          error: "主进程 probe 接口不可用",
+          error: "main-process probe API unavailable",
           durationMs: 0,
         };
       }
@@ -138,13 +151,13 @@ export function useMcpServerProbe(
       };
     },
     enabled: !!probeApi && enabled,
-    // probe 走 spawn npx 较慢,结果缓存 30s 避免重复拉
+    // Probe spawns npx — somewhat slow; cache for 30s to avoid repeats.
     staleTime: 30_000,
     refetchOnWindowFocus: false,
   });
 }
 
-/** 拉取所有 MCP server 配置(broker: 主进程 mcp-registry.json) */
+/** Fetch every configured MCP server (broker reads from main-process mcp-registry.json). */
 export function useMcpServers() {
   const registry = window.cjtClaw?.mcpRegistry;
   return useQuery({
@@ -169,7 +182,7 @@ export function useMcpServers() {
   });
 }
 
-/** 写入(新增 / 编辑) MCP server —— 走 registry IPC, 不再撞 OpenClaw 限流 */
+/** Upsert (add / edit) an MCP server via registry IPC — no longer hits the OpenClaw rate limit. */
 export function useUpsertMcpServer() {
   const qc = useQueryClient();
   return useMutation({
@@ -188,7 +201,7 @@ export function useUpsertMcpServer() {
   });
 }
 
-/** 删除 MCP server */
+/** Remove an MCP server. */
 export function useRemoveMcpServer() {
   const qc = useQueryClient();
   return useMutation({
@@ -204,7 +217,7 @@ export function useRemoveMcpServer() {
   });
 }
 
-/** 切换启用 / 禁用 */
+/** Toggle enable / disable. */
 export function useToggleMcpServer() {
   const qc = useQueryClient();
   return useMutation({
@@ -224,7 +237,7 @@ export function useToggleMcpServer() {
   });
 }
 
-/** 批量导入 */
+/** Batch import. */
 export function useImportMcpServers() {
   const qc = useQueryClient();
   return useMutation({
@@ -245,7 +258,7 @@ export function useImportMcpServers() {
   });
 }
 
-/** 实时 supervisor 健康状态 (启动时拉一次, 之后 onHealthChanged 推送) */
+/** Live supervisor health (one initial fetch + onHealthChanged pushes). */
 export function useMcpHealth() {
   const supervisor = window.cjtClaw?.mcpSupervisor;
   const [snapshot, setSnapshot] = useState<McpHealthStatusEntry[] | null>(null);
@@ -285,7 +298,7 @@ export function useMcpHealth() {
   return { snapshot: snapshot ?? [], byName, ready: snapshot !== null };
 }
 
-/** 触发一次主动 probe (UI"刷新"按钮) */
+/** Trigger a one-shot active probe (used by the UI "refresh" button). */
 export function useTriggerMcpProbe() {
   return useMutation({
     mutationFn: async (name: string) => {
@@ -296,7 +309,7 @@ export function useTriggerMcpProbe() {
   });
 }
 
-/** 读最近的 broker callTool snapshot —— 渲染 per-call 历史 */
+/** Read the most recent broker callTool snapshots — for rendering the per-call history. */
 export function useMcpSnapshotTail(opts?: { limit?: number; brokerSessionId?: string }) {
   return useQuery({
     queryKey: ["mcp-snapshot-tail", opts?.limit ?? 200, opts?.brokerSessionId ?? null],
@@ -310,5 +323,5 @@ export function useMcpSnapshotTail(opts?: { limit?: number; brokerSessionId?: st
   });
 }
 
-// re-export 给 UI / consumers 用 (缩短 import 路径)
+// Re-export so UI / consumers can use a shorter import path.
 export type { McpHealthStatusEntry, McpHealthState, McpBrokerCallSnapshot };

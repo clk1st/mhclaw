@@ -1,47 +1,51 @@
 /**
- * 工作根(Work Root)服务。
+ * Work-root service.
  *
- * "工作根"是用户放任务产出的父目录,首次启动自动创建 ~/mhclaw/,
- * 用户可以在设置里改成别的(比如 ~/Documents/AI/ 或公司项目目录)。
- * 对标 WorkBuddy 的 ~/WorkBuddy/。
+ * The "work root" is the parent directory where mhclaw drops task
+ * outputs. On first launch we create `~/mhclaw/` automatically; the
+ * user can change it in Settings (e.g. to `~/Documents/AI/` or a
+ * project directory). Modeled after WorkBuddy's `~/WorkBuddy/`.
  *
- * 同时维护 ~/.mhclaw/output-dirs.json,记录所有已知任务目录(包括外部绑定的)
- * 供 Composer Popover 列"最近使用"和"收藏"。
+ * We also maintain `~/.mhclaw/output-dirs.json` — an index of every
+ * known task directory (including externally-bound ones) — used by the
+ * Composer popover for "recent" and "pinned" lists.
  */
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { getStateDir } from "../constants.js";
 
-const WORK_ROOT_CONFIG = "work-root.json"; // 记录用户当前工作根位置
-const OUTPUT_DIRS_INDEX = "output-dirs.json"; // 任务目录索引
+const WORK_ROOT_CONFIG = "work-root.json"; // current work-root location
+const OUTPUT_DIRS_INDEX = "output-dirs.json"; // task-directory index
 
 const DEFAULT_WORK_ROOT_NAME = "mhclaw";
 
 export interface OutputDirEntry {
-  /** 绝对路径(任务目录或外部目录) */
+  /** Absolute path (a task directory or external directory). */
   path: string;
-  /** 显示名。空则 UI 用 basename */
+  /** Display name. UI falls back to basename when empty. */
   displayName: string;
   /**
-   * blank   = 工作根下自动建的时间戳目录(最纯粹的任务目录)
-   * external = 用户"打开新文件夹"选的外部目录(可能是已有工程)
+   * blank    = a timestamped directory auto-created under the work root
+   *            (the purest form of a task directory).
+   * external = a directory the user picked via "Open existing folder"
+   *            (might be a pre-existing project).
    */
   kind: "blank" | "external";
-  /** 上次被本应用用过的时间(ms) */
+  /** Last time this app touched this entry (ms). */
   lastUsedAt: number;
-  /** 创建时间(ms) */
+  /** Creation time (ms). */
   createdAt: number;
-  /** 收藏置顶 */
+  /** Pinned in the recents list. */
   pinned: boolean;
 }
 
 interface WorkRootConfig {
-  /** 当前工作根绝对路径 */
+  /** Absolute path of the current work root. */
   path: string;
-  /** 是否由 mhclaw 自动创建的(用户可在设置里改) */
+  /** True if mhclaw auto-created it (user can override in Settings). */
   autoCreated: boolean;
-  /** 最近更新时间 */
+  /** Last update timestamp. */
   updatedAt: number;
 }
 
@@ -57,7 +61,8 @@ function defaultWorkRoot(): string {
   return path.join(os.homedir(), DEFAULT_WORK_ROOT_NAME);
 }
 
-/** 读工作根配置,如无则写入默认值并 ensure 目录 */
+/** Read the work-root config, writing the default if absent and
+ *  ensuring the directory exists. */
 export function ensureWorkRoot(): WorkRootConfig {
   const cfgPath = workRootConfigPath();
   const stateDir = getStateDir();
@@ -85,7 +90,8 @@ export function ensureWorkRoot(): WorkRootConfig {
     console.log(`[WorkRoot] Initialized: ${root}`);
   }
 
-  // 即使配置已存在,也 ensure 目录物理存在(用户可能手动删了)
+  // Even when the config exists, make sure the directory itself does
+  // (the user might have deleted it manually).
   if (!fs.existsSync(cfg.path)) {
     fs.mkdirSync(cfg.path, { recursive: true });
     console.log(`[WorkRoot] Created directory: ${cfg.path}`);
@@ -94,7 +100,7 @@ export function ensureWorkRoot(): WorkRootConfig {
   return cfg;
 }
 
-/** 设置新的工作根(用户在设置里改) */
+/** Pick a new work root (used when the user changes it in Settings). */
 export function setWorkRoot(newPath: string): WorkRootConfig {
   const resolved = path.resolve(newPath);
   if (!fs.existsSync(resolved)) {
@@ -114,7 +120,7 @@ export function getWorkRoot(): WorkRootConfig {
 }
 
 // ============================================================
-// output-dirs.json 索引
+// output-dirs.json index
 // ============================================================
 
 function loadIndex(): OutputDirEntry[] {
@@ -132,18 +138,18 @@ function saveIndex(entries: OutputDirEntry[]) {
   fs.writeFileSync(outputDirsIndexPath(), JSON.stringify(entries, null, 2));
 }
 
-/** 列出所有已知任务目录,按 lastUsedAt 倒序(pinned 优先) */
+/** List every known task directory, sorted by lastUsedAt desc (pinned first). */
 export function listOutputDirs(): OutputDirEntry[] {
   const entries = loadIndex();
   return entries
-    .filter((e) => fs.existsSync(e.path)) // 过滤掉用户已经手动删除的
+    .filter((e) => fs.existsSync(e.path)) // drop entries the user has already deleted
     .sort((a, b) => {
       if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
       return b.lastUsedAt - a.lastUsedAt;
     });
 }
 
-/** 添加或更新一条记录(upsert) */
+/** Add or update an index entry (upsert). */
 export function upsertOutputDir(
   params: Partial<OutputDirEntry> & { path: string },
 ): OutputDirEntry {
@@ -167,7 +173,7 @@ export function upsertOutputDir(
   return entry;
 }
 
-/** 收藏切换 */
+/** Toggle the pinned flag for an entry. */
 export function togglePin(dirPath: string): OutputDirEntry | null {
   const entries = loadIndex();
   const e = entries.find((x) => x.path === dirPath);
@@ -177,7 +183,7 @@ export function togglePin(dirPath: string): OutputDirEntry | null {
   return e;
 }
 
-/** 删除索引(不删实际目录) */
+/** Remove from the index (does NOT delete the actual directory). */
 export function removeOutputDirFromIndex(dirPath: string): void {
   const entries = loadIndex().filter((e) => e.path !== dirPath);
   saveIndex(entries);

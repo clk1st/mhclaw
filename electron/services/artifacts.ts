@@ -1,16 +1,22 @@
 /**
- * 产物清单(Artifacts)持久化服务。
+ * Artifacts persistence service.
  *
- * 真相源 = 任务目录内 `<task-folder>/.mhclaw/artifacts.json`:
- * - 跟任务目录自包含,拷走目录就完整
- * - 跨设备迁移 / 以后 mhwork-api 同步只需加同步层,数据模型不改
- * - 前端 preview-store 仅作运行时缓存,不承担持久化责任
+ * Source of truth: `<task-folder>/.mhclaw/artifacts.json` inside each
+ * task directory.
+ *   - Self-contained per task — copying the directory carries everything.
+ *   - Cross-device migration / future sync (mhwork-api) only needs a
+ *     sync layer; the data model doesn't change.
+ *   - The renderer's preview-store is a runtime cache only — it does NOT
+ *     own persistence.
  *
- * 一条 artifact 目前对应一个 OpenClaw `[embed]` shortcode:
+ * One artifact currently corresponds to one OpenClaw `[embed]`
+ * shortcode:
  *   [embed ref="..." url="..." title="..." preferredHeight="..." kind="..." /]
- * 未来文件系统变更追踪引入后,artifact 可扩展 source: "embed" | "fs"。
+ * Once filesystem change-tracking is added, artifacts will gain
+ * `source: "embed" | "fs"` distinction.
  *
- * 去重策略:ref 优先,次 url;相同签名不重复写。
+ * Dedup strategy: prefer `ref`, fall back to `url`. Don't write the
+ * same signature twice.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -20,31 +26,37 @@ const MHWORK_SUB = ".mhclaw";
 const ARTIFACTS_JSON = "artifacts.json";
 
 /**
- * 产物条目。两种 source:
- * - "embed":AI 消息里显式声明的 [embed](canvas URL / 非文件富内容)
- *           → 持久化到 .mhclaw/artifacts.json
- * - "fs"   :task folder 里命中白名单后缀的成品文件(xlsx/docx/pdf/md/html/...)
- *           → 扫盘动态生成,不落库(磁盘本身是真相源)
+ * Artifact entry. Two kinds of `source`:
+ *   - "embed": explicitly declared by the AI inside `[embed]` shortcodes
+ *              (canvas URLs / non-file rich content). Persisted to
+ *              `.mhclaw/artifacts.json`.
+ *   - "fs"   : output files in the task folder whose extension is in
+ *              the whitelist (xlsx/docx/pdf/md/html/...). Discovered by
+ *              filesystem scan; NOT persisted, since the disk itself is
+ *              the source of truth.
  */
 export interface ArtifactEntry {
   source: "embed" | "fs";
   title?: string;
-  /** embed 时等于 registeredAt;fs 时等于文件 mtime */
+  /** For embed: equals `registeredAt`. For fs: equals the file mtime. */
   registeredAt: number;
 
-  /** embed 专属 */
+  /** Embed-only fields. */
   ref?: string;
   url?: string;
   preferredHeight?: number;
   kind?: string;
 
-  /** fs 专属:相对 task folder 的路径,用于拼 mhclaw-workspace:// URL */
+  /**
+   * fs-only: path relative to the task folder, used to assemble a
+   * `mhclaw-workspace://` URL.
+   */
   relPath?: string;
   size?: number;
   mtime?: number;
 }
 
-/** 仅落到 artifacts.json 的字段(source="embed") */
+/** Fields actually written to artifacts.json (only `source: "embed"`). */
 interface EmbedFileEntry {
   source: "embed";
   registeredAt: number;
@@ -60,7 +72,7 @@ interface ArtifactsFile {
   entries: EmbedFileEntry[];
 }
 
-/** 产物白名单:AI 输出里"有意义的成品"的后缀 */
+/** Whitelist of "meaningful output" file extensions in AI output. */
 const PRODUCT_EXT = new Set([
   ".xlsx", ".xls",
   ".docx", ".doc",
@@ -89,7 +101,8 @@ function loadFile(taskPath: string): ArtifactsFile {
     if (!data || !Array.isArray(data.entries)) return { version: 1, entries: [] };
     return { version: 1, entries: data.entries };
   } catch {
-    // 文件损坏就当空,不丢历史的做法等 v2 再说(复杂度不值)
+    // Treat corruption as empty for now. A "preserve history" recovery
+    // path can wait for v2 — the complexity isn't worth it today.
     return { version: 1, entries: [] };
   }
 }
@@ -104,8 +117,9 @@ function signature(a: { ref?: string; url?: string }): string {
 }
 
 /**
- * 扫 task folder 下所有成品文件(递归,跳过 .mhclaw 和隐藏,后缀白名单)。
- * 深度限制 6 层,防止异常目录结构拖累。
+ * Walk the task folder for output files (recursively; skips `.mhclaw`
+ * and other hidden dirs; only whitelisted extensions). Depth is capped
+ * at 6 to avoid pathological directory trees stalling the walk.
  */
 function listFsArtifacts(taskPath: string): ArtifactEntry[] {
   const results: ArtifactEntry[] = [];
@@ -150,12 +164,15 @@ function listFsArtifacts(taskPath: string): ArtifactEntry[] {
 }
 
 /**
- * 读 session 对应 task folder 的 artifacts。
- * 合并两路:
- * - embed 持久化条目(artifacts.json)
- * - fs 成品文件(白名单后缀)
- * 去重策略:fs 的 relPath 若被任何 embed.url 包含(AI 既发了文件又 [embed] 的情况),
- *          保留 embed 版本,丢 fs 版本。按 registeredAt 倒序。
+ * Read a session's artifacts (resolves the bound task folder, then
+ * merges):
+ *   - persisted embed entries (artifacts.json)
+ *   - whitelisted output files on the filesystem
+ *
+ * Dedup: if any fs entry's `relPath` is contained in an embed entry's
+ * `url` (i.e. the AI both wrote the file AND emitted an [embed] for
+ * it), keep the embed and drop the fs duplicate. Sorted by
+ * `registeredAt` descending.
  */
 export function listArtifactsForSession(sessionKey: string): ArtifactEntry[] {
   const taskPath = getFolderForSession(sessionKey);
@@ -169,7 +186,7 @@ export function listArtifactsForSession(sessionKey: string): ArtifactEntry[] {
   const embedUrlHay = embedEntries
     .map((e) => e.url ?? "")
     .filter(Boolean)
-    .join("\u0001");
+    .join("");
   const merged: ArtifactEntry[] = [...embedEntries];
   for (const f of fsEntries) {
     if (f.relPath && embedUrlHay.includes(f.relPath)) continue;
@@ -188,11 +205,15 @@ export interface AddInput {
 }
 
 /**
- * 把一批 embed 批量登记到 session 对应 task folder 的 artifacts.json。
- * - 无签名(既没 ref 又没 url)的跳过
- * - 已存在(相同签名)的跳过,不重复
- * - session 没绑 task folder 的返回 null(调用方应该先 ensureForSession)
- * 返回:合并后的完整 entries 列表(方便前端直接用作 query 缓存更新)
+ * Batch-register a list of embed entries to a session's bound task
+ * folder.
+ *   - Inputs without a signature (no ref AND no url) are skipped.
+ *   - Inputs whose signature already exists are skipped (no duplicates).
+ *   - Returns null if the session isn't bound to a task folder yet —
+ *     the caller should ensureForSession first.
+ *
+ * Returns the merged full entries list — handy for the renderer to
+ * update its query cache directly.
  */
 export function addArtifactsForSession(
   sessionKey: string,

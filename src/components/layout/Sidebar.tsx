@@ -55,10 +55,13 @@ export function Sidebar() {
   const sessionTitles = useChatStore((s) => s.sessionTitles);
   const hasMessages = useChatStore((s) => s.messages.length > 0);
   const isLoadingCurrent = useChatStore((s) => s.loading);
-  // 当前会话的"实时首条用户消息":lockSessionTitle 有时序窗口(Gateway 迁移前/后),
-  // 这里直接从内存消息流取,保证用户发消息那一刻 sidebar 立即显示。
-  // 注意:loadHistory 回来的 content 带 marker(Gateway 存的是注入后的 payload),
-  // 必须 stripMarkers 才能拿到干净的用户提问。
+  // Live first-user-message of the current session. lockSessionTitle
+  // has a timing window (around the Gateway sessionKey rewrite); read
+  // straight from the in-memory message stream so the sidebar updates
+  // the instant the user sends.
+  // NOTE: loadHistory results carry markers in `content` (Gateway
+  // persists the post-injection payload), so we must stripMarkers to
+  // get the clean user prompt.
   const liveCurrentTitle = useChatStore((s) => {
     const first = s.messages.find((m) => m.role === "user");
     if (!first?.content) return "";
@@ -71,7 +74,7 @@ export function Sidebar() {
     loadMore,
     isLoadingMore,
   } = useSessions();
-  // 定时任务 name 映射:cron session 的 title fallback 到对应 job 的 name
+  // Cron job-name lookup: cron-triggered session titles fall back to the job's name.
   const { data: cronJobs = [] } = useCrons();
   const cronNameById = useMemo(() => {
     const m = new Map<string, string>();
@@ -89,7 +92,7 @@ export function Sidebar() {
   const lockSessionTitle = useChatStore((s) => s.lockSessionTitle);
 
   const handleRename = (key: string, title: string) => {
-    // force=true 覆盖已有冻结标题
+    // force=true overrides any previously-frozen title.
     lockSessionTitle(key, title, true);
   };
 
@@ -110,13 +113,17 @@ export function Sidebar() {
       toast.error(err instanceof Error ? err.message : "打开文件夹失败");
     }
   };
-  // claw agent 的 session 是 channel(微信 / 企微 / 钉钉)专属主对话,入口放在 Claw 页,
-  // 不和桌面 UI 的任务混在一起。参考 WorkBuddy:Claw 主对话在独立入口展示,不进任务列表。
-  // 已归档的 session 也从主任务列表剔除,只在"数据管理"Dialog 里可见。
+  // Sessions from the `claw` agent are channel-dedicated main
+  // conversations (WeChat / WeCom / DingTalk); their entry point lives
+  // on the Claw page, not mixed into the desktop task list. Modeled
+  // after WorkBuddy: the Claw main conversation has its own entry
+  // and isn't part of "Tasks".
+  // Archived sessions are likewise filtered out of the main list and
+  // only visible in the "Data Management" dialog.
   const baseSessions = allSessions.filter(
     (s) => s.agentId !== "claw" && !archivedList.includes(s.key),
   );
-  // 搜索:按 title / frozen title / key 做 case-insensitive 子串匹配
+  // Search: case-insensitive substring match across title / frozen title / key.
   const q = searchQuery.trim().toLowerCase();
   const sessions = q
     ? baseSessions.filter((s) => {
@@ -132,7 +139,8 @@ export function Sidebar() {
       })
     : baseSessions;
 
-  // "新建任务"是"空会话"虚拟状态：只在首页 + 没消息时高亮，跟 session item 互斥
+  // "New task" is a virtual "empty-session" state — only highlighted on
+  // Home with no messages; mutually exclusive with selecting a session.
   const newTaskActive = isHome && !hasMessages;
 
   const handleNewTask = () => {
@@ -220,8 +228,10 @@ export function Sidebar() {
             onRename={handleRename}
             onOpenFolder={handleOpenFolder}
             onDelete={setPendingDelete}
-            // 搜索模式下不展示"显示更早"——搜索只过滤已加载的,展示"加载更多"
-            // 会让用户误以为搜索结果不全但点了也没帮助,直接隐藏更诚实
+            // Hide "load earlier" while searching — search only filters
+            // already-loaded sessions, so showing it would mislead the
+            // user into thinking the results are partial when clicking
+            // wouldn't help. Hiding is more honest.
             showLoadMore={!q && hasMore}
             loadMoreBusy={isLoadingMore}
             onLoadMore={loadMore}
@@ -252,7 +262,9 @@ export function Sidebar() {
               onClick={() => {
                 if (pendingArchive) {
                   archive(pendingArchive.key);
-                  // 如果归档的是当前激活 session,顺手切到"新建"状态避免继续停在已归档
+                  // If archiving the active session, switch to a new
+                  // "blank" state so the UI doesn't stay parked on an
+                  // archived session.
                   if (pendingArchive.key === currentSessionKey) {
                     useChatStore.getState().newSession();
                   }
@@ -305,7 +317,8 @@ export function Sidebar() {
   );
 }
 
-/** 主导航项 · 选中态 brand-soft pill + 左侧 2px accent bar(对齐 redesign) */
+/** Primary navigation item — active style: brand-soft pill + a 2px
+ *  accent bar on the left edge (per redesign spec). */
 function SidebarItem({
   active,
   onClick,
@@ -343,7 +356,7 @@ function SidebarItem({
   );
 }
 
-/** 分桶:进行中 · N / 今天 / 昨天 / 更早 */
+/** Time buckets: Running · N / Today / Yesterday / Earlier. */
 type BucketKey = "running" | "today" | "yesterday" | "earlier";
 
 function bucketOf(
@@ -472,7 +485,8 @@ function SessionItem({
   session: SessionInfo;
   frozenTitle?: string;
   liveTitle?: string;
-  /** cron session 对应的 job name(从 cron.list 查到,已删除的 job 为 undefined) */
+  /** Cron job name for cron-triggered sessions (looked up via
+   *  cron.list; undefined when the job has been deleted). */
   cronName?: string;
   active: boolean;
   status: SessionStatus;
@@ -482,9 +496,10 @@ function SessionItem({
   onOpenFolder?: () => void;
   onDelete?: () => void;
 }) {
-  // Gateway 给不出真实 title 时会 fallback 成各种无意义形式,识别并忽略:
-  //  - "8c90bd41 (2026-04-18)":hash+日期
-  //  - "[cron:21f31abb-90bb-...]":定时任务自动命名(UUID)
+  // When the Gateway can't supply a real title it falls back to
+  // various meaningless forms — detect and discard:
+  //   - "8c90bd41 (2026-04-18)" — hash + date
+  //   - "[cron:21f31abb-90bb-...]" — auto-named cron sessions (UUID)
   const gatewayTitle = session.title?.trim() ?? "";
   const usableGatewayTitle =
     gatewayTitle &&
@@ -492,13 +507,18 @@ function SessionItem({
     !/^\[cron:[a-f0-9-]+\]$/i.test(gatewayTitle)
       ? gatewayTitle
       : "";
-  // lastMessage 可能是 OpenClaw 静默标记 "NO_REPLY" / "no_reply" —— 无用户意义
+  // `lastMessage` can be the OpenClaw silent marker "NO_REPLY" /
+  // "no_reply" — no user meaning, skip it.
   const lastMsg = session.lastMessage?.trim() ?? "";
   const usableLastMsg = /^no_reply$/i.test(lastMsg) ? "" : lastMsg;
-  // liveTitle(当前 session 内存里的首条 user 消息)优先级最高 —— 发完立即显示。
-  // session.key 这种 agent:main:session-<ts> 形式的内部 id 永远不该直接当标题暴露,
-  // 没有更好的 title 就显示"未命名任务"(用户看到至少是人话)
-  // cron session 优先用 cron job 的 name(更有业务意义),查不到再退 fallback 链
+  // liveTitle (the in-memory first-user-message of the current
+  // session) has the highest priority — it shows up immediately on
+  // send. Never expose `session.key` directly as a title — that's an
+  // internal id like `agent:main:session-<ts>`. With nothing better,
+  // fall back to "未命名任务" (an end-user phrasing in Chinese for
+  // current users; will be i18n'd later).
+  // For cron sessions, prefer the cron job's `name` (more meaningful);
+  // fall through the chain if not found.
   const baseTitle =
     (session.isCron && cronName?.trim()) ||
     liveTitle?.trim() ||
@@ -506,17 +526,18 @@ function SessionItem({
     usableGatewayTitle ||
     usableLastMsg ||
     "未命名任务";
-  // 定时任务触发的 session 前缀"[定时任务]",让用户一眼区分自动/手动
+  // Prefix cron-triggered session titles with "[定时任务]" so the user
+  // can tell automated vs manual at a glance.
   const rawTitle = session.isCron ? `[定时任务] ${baseTitle}` : baseTitle;
-  // 把换行 / 多空白压成单空格,配合 CSS truncate 一行显示
+  // Squash newlines / repeated whitespace to a single space so CSS truncate works on one line.
   const title = rawTitle.replace(/\s+/g, " ").trim();
 
-  // Inline rename 状态
+  // Inline rename state.
   const [renaming, setRenaming] = useState(false);
   const [editText, setEditText] = useState(title);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // 进入 renaming 时自动 focus + 全选
+  // Auto-focus + select-all when entering rename mode.
   useEffect(() => {
     if (renaming && inputRef.current) {
       inputRef.current.focus();
@@ -669,7 +690,7 @@ function SessionItem({
   );
 }
 
-/** 相对时间:刚刚 / N 分钟前 / N 小时前 / N 天前 / YYYY-MM-DD */
+/** Relative time: just-now / N min ago / N hr ago / N day ago / YYYY-MM-DD. */
 function formatRelativeTime(ts: number): string {
   const diff = Date.now() - ts;
   if (diff < 60_000) return "刚刚";

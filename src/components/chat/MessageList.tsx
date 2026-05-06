@@ -30,15 +30,21 @@ interface MessageListProps {
 }
 
 /**
- * 消息列表(对标 WorkBuddy):
+ * Message list (modeled after WorkBuddy).
  *
- * 渲染粒度不是"一条 message 一个气泡",而是按**对话 turn** 聚合:
- *   - 一次用户输入(真实 user message)
- *   - 之后所有 agent 过程(中间 text "让我换个方式..." + tool_use/tool_result + 夹着的伪 user tool_result)
- *     → 收进**单个** `ToolCallGroup`,顶部"N 个工具调用 · M 条过程消息"折叠
- *   - 最后一条纯 text assistant(最终答案)独立 markdown 展示
+ * Render granularity isn't "one message per bubble" — instead we
+ * aggregate by **conversation turn**:
+ *   - One user input (a real user message)
+ *   - Followed by every agent step in between: interstitial text
+ *     (e.g. "let me try a different approach..."), tool_use /
+ *     tool_result calls, and the synthetic user tool_result messages
+ *     OpenClaw injects → all collapsed into a single `ToolCallGroup`
+ *     with a header like "N tool calls · M intermediate messages".
+ *   - The final pure-text assistant message (the final answer) is
+ *     rendered as standalone markdown.
  *
- * 这样即使 OpenClaw 把一个 run 拆成多条 message 推过来,UI 也能把它们聚回一个 turn。
+ * Even when OpenClaw splits a single run across multiple messages, the
+ * UI re-groups them back into one logical turn.
  */
 export function MessageList({ messages, loading }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -48,7 +54,8 @@ export function MessageList({ messages, loading }: MessageListProps) {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages, loading]);
 
-  // 找最后一个 turn 的序号,loading 态只给它加"streaming indicator"
+  // Index of the last turn — only this one gets the "streaming
+  // indicator" decoration while loading=true.
   const lastTurnIndex = (() => {
     for (let i = items.length - 1; i >= 0; i--) {
       if (items[i].kind === "turn") return i;
@@ -78,13 +85,16 @@ export function MessageList({ messages, loading }: MessageListProps) {
 }
 
 /**
- * 把 messages 展开成渲染项数组:
- * - 真实 user/assistant 消息按原 groupTurns 逻辑聚成 Turn
- * - OpenClaw heartbeat-runner 注入的伪 user 消息:
- *   - "drop" 类 → 跳过(HEARTBEAT 指令 / doctor 命令 / 注入 context)
- *   - "banner" 类 → 转成 SystemBanner 项(config-patch ok / 已添加 xxx)
+ * Expand the message list into render items:
+ *   - Real user/assistant messages go through `groupTurns` as before.
+ *   - Synthetic user messages injected by OpenClaw's heartbeat-runner:
+ *       - "drop"   → skip entirely (HEARTBEAT directives / doctor
+ *                    commands / context injections)
+ *       - "banner" → render as a SystemBanner item (e.g. config-patch
+ *                    ack / "added X" notifications)
  *
- * banner 插在原消息的位置,不破坏时序。
+ * Banner items are inserted at the original message position so the
+ * chronological order is preserved.
  */
 type RenderItem =
   | { kind: "turn"; turn: Turn }
@@ -114,16 +124,18 @@ function buildRenderItems(messages: ChatMessage[]): RenderItem[] {
       flush();
       if (text) items.push({ kind: "banner", text });
     }
-    // "drop" 跳过,什么都不做
+    // "drop" — skip entirely.
   }
   flush();
   return items;
 }
 
 /**
- * 居中单行灰色横幅 —— 系统事件反馈(gateway 重启 / 配置更新 / MCP 添加等),
- * 跟 user/assistant 气泡视觉完全区分。两侧横线包裹,强调"这不是谁说的话,
- * 是系统发生的事"。
+ * Centered single-line gray banner — for system event feedback
+ * (gateway restart / config update / MCP added / etc). Visually
+ * distinct from user/assistant bubbles. Wrapped by horizontal rules
+ * on both sides to emphasize "this is not someone speaking — this is
+ * something the system did".
  */
 function SystemBanner({ text }: { text: string }) {
   return (
@@ -139,20 +151,27 @@ function SystemBanner({ text }: { text: string }) {
 
 
 /**
- * 一个对话 turn:
- * - userMsg 可能为 null(load history 时首条就是 assistant 的边界情况)
- * - processBlocks:过程区所有 block(tool_use / tool_result / thinking / 中间 text)
- * - finalBlocks:最终答案的 text block(一段或多段,turn 末尾连续的纯 text)
- * - finalRef:取最终答案的元信息(streaming / id / 用于 embed 解析的 content)的来源 message
- * 注意:按 **block** 分类而不是按 message 分类 —— OpenClaw 有时把 text + toolCall
- *      塞在同一条 message 的 content 里,按 message 归类会连 text 一起吃掉。
+ * One conversation turn.
+ *   - `userMsg` may be null (edge case: when loadHistory's first
+ *     message is already from the assistant).
+ *   - `processBlocks` — all "process area" blocks: tool_use,
+ *     tool_result, thinking, interstitial text.
+ *   - `finalBlocks` — the final answer's text blocks (one or more
+ *     consecutive pure-text blocks at the end of the turn).
+ *   - `finalRef` — the source message used for the final answer's
+ *     metadata (streaming flag, id, embed-resolve content, etc.).
+ *
+ * IMPORTANT: classification is done per-**block**, not per-message.
+ * OpenClaw sometimes packs text and toolCall into the same message's
+ * `content`; classifying by message would swallow the text along
+ * with the tool call.
  */
 interface Turn {
   userMsg: ChatMessage | null;
   processBlocks: MessageBlock[];
   finalBlocks: Extract<MessageBlock, { type: "text" }>[];
   finalRef: ChatMessage | null;
-  /** turn 是否仍在流式进行中(最后一条 assistant 还 streaming=true) */
+  /** Is the turn still streaming (last assistant has streaming=true)? */
   isStreaming: boolean;
 }
 
@@ -194,23 +213,29 @@ function buildTurn(p: {
   assistantMsgs: ChatMessage[];
   toolResultMsgs: ChatMessage[];
 }): Turn {
-  // 收集 turn 内所有 assistant blocks,保持顺序
+  // Collect every assistant block within the turn, preserving order.
   const allBlocks: MessageBlock[] = [];
   for (const m of p.assistantMsgs) {
     for (const b of m.blocks ?? []) allBlocks.push(b);
   }
-  // 把伪 user 的 tool_result 也放进过程(ToolCallGroup 按 tool_use_id 配对)
+  // Synthetic user tool_results also go into the process area
+  // (ToolCallGroup pairs them with tool_use by tool_use_id).
   for (const m of p.toolResultMsgs) {
     for (const b of m.blocks ?? []) allBlocks.push(b);
   }
 
-  // 从 assistantMsgs 按顺序放 allBlocks(上面已放),伪 user tool_result 放在最后
-  // tool_use ↔ tool_result 配对不依赖顺序,依赖 tool_use_id,所以 OK
+  // Order: assistant blocks first (added above), tool_results last.
+  // tool_use ↔ tool_result pairing is keyed by tool_use_id, not
+  // sequence, so this is fine.
 
-  // 从末尾向前扫 assistantBlocks,text 和 thinking 都"透明"(可穿过),
-  // 碰到 tool_use / tool_result 才停。透明区里的 text 是 final,其余(thinking)归 process。
-  // 理由:OpenClaw 里 thinking 可能出现在 text 之前或之后,如果只挑"最后连续 text",
-  //      thinking 夹在中间会把 text 挡进 process,用户看不到 AI 的文字回复。
+  // Walk assistantBlocks back-to-front. `text` and `thinking` are
+  // "transparent" (we keep walking through them); we stop at
+  // `tool_use` / `tool_result`. In the resulting transparent tail,
+  // text counts as final and thinking belongs to process.
+  // Why: OpenClaw can emit `thinking` before OR after the text. If we
+  // naively grabbed only the trailing consecutive text, a thinking
+  // block sandwiched in the middle would push earlier text into the
+  // process area — and the user would lose sight of the AI's reply.
   const assistantBlocks: MessageBlock[] = [];
   for (const m of p.assistantMsgs) {
     for (const b of m.blocks ?? []) assistantBlocks.push(b);
@@ -225,23 +250,27 @@ function buildTurn(p: {
     break;
   }
 
-  // 透明区里,text = final,thinking = process
+  // Inside the transparent tail: text → final, thinking → process.
   const transparentTail = assistantBlocks.slice(transparentStart);
   const finalBlocks = transparentTail.filter(
     (b): b is Extract<MessageBlock, { type: "text" }> => b.type === "text",
   );
   const thinkingFromTail = transparentTail.filter((b) => b.type !== "text");
 
-  // process = 透明区之前的所有 block + 透明区里的 thinking + 所有伪 user tool_result
+  // Process = (everything before the transparent tail) +
+  // (thinking blocks within the tail) + (all synthetic
+  // user tool_results).
   const processBlocks: MessageBlock[] = [
     ...assistantBlocks.slice(0, transparentStart),
     ...thinkingFromTail,
     ...p.toolResultMsgs.flatMap((m) => m.blocks ?? []),
   ];
 
-  // 如果最后一条 assistant 还 streaming,且我们挑出的 finalBlocks 为空,
-  // 说明模型还没开始吐最终文字(可能还在跑工具)。保持 finalBlocks 为空,
-  // 此时 ToolCallGroup 会渲染进度;等 final text delta 到来会自然切换。
+  // If the last assistant is still streaming and finalBlocks turned up
+  // empty, the model hasn't started emitting its final text yet (may
+  // still be running tools). Leave finalBlocks empty — ToolCallGroup
+  // renders progress instead, and the UI will switch over naturally
+  // when the first text delta arrives.
   const lastAssistant = p.assistantMsgs[p.assistantMsgs.length - 1] ?? null;
 
   return {
@@ -262,8 +291,10 @@ function TurnView({
 }) {
   const hasFinal = turn.finalBlocks.length > 0;
   const hasProcess = turn.processBlocks.length > 0;
-  // agent 还没吐出任何 process/final 前的黑盒等待态,用"正在思考…"占位。
-  // 跟 ToolCallGroup 的 header 共用同一行 DOM,切换时只换文字,不 layout jump。
+  // Black-box wait state — agent hasn't emitted any process / final
+  // content yet. Show a "thinking…" placeholder. The DOM structure
+  // matches ToolCallGroup's streaming header, so switching to
+  // "executing · xxx" only changes text, never causes layout shift.
   const showThinking = isLastAndLoading && !!turn.userMsg && !hasProcess && !hasFinal;
   return (
     <>
@@ -283,8 +314,9 @@ function TurnView({
 }
 
 /**
- * "正在思考…" 占位 —— DOM 结构与 ToolCallGroup 的 streaming header 完全一致,
- * 保证切换到"正在执行 · xxx"时只改文字,没有高度/边距跳动。
+ * "Thinking..." placeholder. DOM matches ToolCallGroup's streaming
+ * header exactly so switching to "Executing · xxx" only changes
+ * text — no height/margin jump.
  */
 function ThinkingIndicator() {
   return (
@@ -299,8 +331,9 @@ function ThinkingIndicator() {
 
 function UserBubble({ msg }: { msg: ChatMessage }) {
   const stripped = stripMarkers(msg.content);
-  // stripMarkers 剥掉 [output_dir:] / [Plan mode] 等 marker 后,可能在前后留下空行,
-  // 气泡里会出现肉眼可见的多余空行。trim 掉。
+  // After stripMarkers removes [output_dir:] / [Plan mode] etc., the
+  // surrounding blank lines can leak into the bubble as visible
+  // whitespace. Trim them.
   const text = (stripped.visibleText || msg.content).trim();
   return (
     <div
@@ -324,7 +357,8 @@ function UserBubble({ msg }: { msg: ChatMessage }) {
   );
 }
 
-/** 展示"发送该条消息时勾选的 skill"—— 跟 Composer chip 同视觉 */
+/** Render the skills that were selected when this message was sent —
+ *  visually identical to the Composer's skill chip. */
 function UserSelectedSkillChips({ skillKeys }: { skillKeys: string[] }) {
   const { data } = useSkills();
   const byKey = new Map((data?.skills ?? []).map((s) => [s.skillKey, s]));
@@ -353,7 +387,7 @@ function UserSelectedSkillChips({ skillKeys }: { skillKeys: string[] }) {
   );
 }
 
-/** 过程区:turn 内所有 tool_use / tool_result / thinking / 中间 text 的集合 */
+/** Process area: every tool_use / tool_result / thinking / interstitial text in the turn. */
 function ProcessBlocks({
   blocks,
   isStreaming,
@@ -369,8 +403,8 @@ function ProcessBlocks({
 }
 
 /**
- * 最终答案:turn 末尾连续的 text block 拼接后 markdown 渲染。
- * embed 解析用 final text(拼接后)。
+ * Final answer: concatenate the trailing text blocks and render as
+ * markdown. Embed parsing operates on the joined final text.
  */
 function AssistantFinal({
   blocks,
@@ -387,15 +421,19 @@ function AssistantFinal({
   const stripped = stripMarkers(rawText);
   const embeds = stripped.embeds;
 
-  // 消息定稿后(非 streaming),把 [embed] 落到 <task-folder>/.mhclaw/artifacts.json。
-  // 这是产物的唯一持久化触发点 —— 主进程做去重 + ensure task folder。
+  // Once the message is finalized (no longer streaming), persist any
+  // [embed]s to <task-folder>/.mhclaw/artifacts.json. This is the
+  // ONE place artifacts get persisted — the main process handles
+  // dedup + ensures the task folder exists.
   useEffect(() => {
     if (ref_.streaming) return;
     if (!sessionKey) return;
     const { embeds: parsed } = parseEmbeds(rawText);
     if (parsed.length === 0) return;
     addArtifacts.mutate({ sessionKey, entries: parsed });
-    // addArtifacts 的 mutate 引用稳定,不放进依赖(否则每轮创建新 mutation 触发无限循环)
+    // `addArtifacts.mutate` has a stable reference; leaving it out of
+    // the dep array on purpose (including it would create a new
+    // mutation each tick → infinite loop).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ref_.streaming, rawText, sessionKey]);
 
@@ -432,17 +470,20 @@ function AssistantFinal({
   );
 }
 
-/** M logo 头像 —— 用在 assistant 消息左侧。24px 保留 cursor,无 sparkle,跟消息密度匹配 */
+/** M-logo avatar — shown to the left of assistant messages. 24px,
+ *  cursor preserved, no sparkle: matches the chat message density. */
 function AssistantAvatar() {
   return <IconBadge size={24} variant="gradient" className="mt-0.5" />;
 }
 
 /**
- * 助手消息的 Markdown 渲染:
- * - GFM(表格 / 删除线 / 任务列表 / 自动链接)
- * - 用 Tailwind 后代选择器给 markdown 输出的原生元素套样式,
- *   不通过 components 覆写(react-markdown v10 的 components 类型跟 v9 有 diff,
- *   直接 class 后代选择器最稳,出不了运行时错)
+ * Markdown rendering for assistant messages:
+ *   - GFM (tables, strikethrough, task lists, autolinks)
+ *   - Style markdown output via Tailwind descendant selectors on the
+ *     emitted native elements, not via the `components` override —
+ *     react-markdown v10's `components` type diverges from v9, and
+ *     class-based descendant selectors are the most robust path with
+ *     no runtime risk.
  */
 function MarkdownBody({ source }: { source: string }) {
   return (
@@ -453,14 +494,17 @@ function MarkdownBody({ source }: { source: string }) {
 }
 
 /**
- * 4 态 embed 按钮:
- *  - pending    灰,禁用,"等待生成"
- *  - generating 脉动灰,禁用,"生成中"
- *  - ready      正常白,可点"打开预览"
- *  - error      红底浅,可点(点了也走兜底再 probe 一次),显示原因
+ * Four-state embed button:
+ *   - pending    gray, disabled, "Pending" label
+ *   - generating pulsing gray, disabled, "Generating" label
+ *   - ready      normal white, clickable, "Open preview" label
+ *   - error      light red, still clickable (click triggers a
+ *                fallback re-probe), shows the reason
  *
- * 点击时做兜底校验:即使 UI 显示 ready,也会同步 re-probe 一次 ——
- * 文件可能刚被删、权限失效、CDN 掉线等。UI 态永远有滞后窗口,不能只信它。
+ * Even when the UI says "ready", we re-probe synchronously on click
+ * as a sanity check — the file may have just been deleted, permission
+ * may have changed, the CDN may have dropped, etc. UI state always
+ * lags real state, so we never fully trust it.
  */
 function EmbedButton({
   embed,
@@ -476,17 +520,17 @@ function EmbedButton({
   const { status, refetch } = usePreviewAvailability(url, { runActive });
 
   const handleClick = async () => {
-    // 点击兜底:同步 probe 一次,以最新为准
+    // Fallback on click: re-probe synchronously and take the freshest result.
     const fresh = await refetch();
     if (fresh.kind === "ready") {
       onOpen();
       return;
     }
-    // 没就绪:用户点击也给清晰反馈,不默默吞掉
+    // Not ready: surface a clear message instead of silently dropping.
     if (fresh.kind === "pending" || fresh.kind === "generating") {
       toast.info("文件还在生成中,稍等再试");
     } else {
-      // 识别"文件未生成"这类常见场景,给人话而不是 HTTP 404
+      // Detect "file not generated" as a friendlier message than HTTP 404.
       const reason = String(fresh.reason ?? "");
       if (/文件未生成|未生成|ENOENT|404|not.?found|no such file/i.test(reason)) {
         toast.error("文件未生成", {
@@ -551,8 +595,10 @@ function statusVisual(status: PreviewStatus): {
         disabled: false,
       };
     case "error": {
-      // 区分"文件未生成"(AI 没写成)vs 真 error —— 前者是常见场景,
-      // AI 可能只是问了要不要保存没真写,用户看 "HTTP 404" 是懵的。
+      // Distinguish "file not generated" (AI never wrote it) from a
+      // real error — the former is the common case (the AI may have
+      // just asked whether to save without actually writing), and
+      // showing "HTTP 404" to the user there is unhelpful.
       const reason = String(status.reason ?? "");
       const notGenerated =
         /文件未生成|未生成|ENOENT|404|not.?found|no such file/i.test(reason);

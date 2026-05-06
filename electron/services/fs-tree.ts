@@ -1,6 +1,7 @@
 /**
- * 简单的目录列举,供 FilesTab 展示。
- * 不递归加载(按需展开),减少大目录时的开销。
+ * Lightweight directory listing for the FilesTab.
+ * Loads only the immediate children (no recursion), so large
+ * directories stay snappy.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -25,8 +26,9 @@ export interface FsNode {
 }
 
 /**
- * 把 rel 解析为 abs,严格要求落在 taskPath 内,防 ../ 穿越和符号链接逃逸。
- * 失败抛错,调用方直接 throw。
+ * Resolve `rel` to an absolute path, enforcing that it stays within
+ * `taskPath` (defends against `../` traversal and symlink escapes).
+ * Throws on violation; callers should let it propagate.
  */
 export function resolveSafePath(taskPath: string, rel: string): string {
   const baseAbs = path.resolve(taskPath);
@@ -37,25 +39,26 @@ export function resolveSafePath(taskPath: string, rel: string): string {
   return targetAbs;
 }
 
-/** 写入文本(覆盖)。仅允许在任务目录内,自动建父目录。 */
+/** Write a text file (overwrite). Path must stay within the task dir;
+ *  parent directories are created automatically. */
 export function writeTextFile(taskPath: string, rel: string, content: string): void {
   const abs = resolveSafePath(taskPath, rel);
   fs.mkdirSync(path.dirname(abs), { recursive: true });
   fs.writeFileSync(abs, content, "utf-8");
 }
 
-/** 删除文件(不递归目录)。 */
+/** Delete a file (does NOT recurse into directories). */
 export function deleteFile(taskPath: string, rel: string): void {
   const abs = resolveSafePath(taskPath, rel);
   if (!fs.existsSync(abs)) return;
   const st = fs.statSync(abs);
-  if (st.isDirectory()) throw new Error("不能用 deleteFile 删目录");
+  if (st.isDirectory()) throw new Error("deleteFile does not delete directories");
   fs.unlinkSync(abs);
 }
 
 /**
- * 列出 <taskPath>/<rel> 这一层的直接子节点。
- * rel="" 表示根。
+ * List immediate children of `<taskPath>/<rel>`.
+ * `rel === ""` means the root.
  */
 export function listChildren(taskPath: string, rel: string): FsNode[] {
   const abs = path.join(taskPath, rel);
