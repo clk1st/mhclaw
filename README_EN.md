@@ -105,4 +105,3 @@ See [docs/](./docs/) (TODO: porting key ADRs here).
 
 - [OpenClaw](https://www.openclaw.ai) — provides the underlying gateway and agent runtime
 - [Anthropic Model Context Protocol](https://modelcontextprotocol.io) — MCP standard
-- [WorkBuddy](https://workbuddy.qq.com) — product UX benchmark
