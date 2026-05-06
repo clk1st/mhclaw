@@ -1,0 +1,72 @@
+name: Build Windows
+
+# 触发方式:
+#  - 手动:GitHub Actions 页面点「Run workflow」,选分支
+#  - 打 tag `v*` 时自动跑(例如 v0.1.0),并直接挂到 GitHub Release
+# 不在每次 push 上触发 —— Windows 跑一次 15+ 分钟,日常开发不值得
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          # 22 覆盖 OpenClaw 里 engines.node >= 22 的依赖
+          node-version: 22
+          cache: pnpm
+
+      - name: Install deps (hoisted linker required for OpenClaw runtime)
+        run: pnpm install --frozen-lockfile=false
+
+      - name: Patch app-builder-lib pnpm collector depth
+        run: node scripts/patch-app-builder.mjs
+
+      # 等价于 pnpm run build:electron,但最后一步显式 --publish=never。
+      # electron-builder v26 在 CI 下默认尝试推 GitHub Release,我们不靠它推,
+      # 靠下面的 softprops/action-gh-release 只在 tag 时推。不加 flag 会
+      # 因为缺 GH_TOKEN 退出 1,把已经打好的 .exe 白丢掉。
+      - name: Build Windows installer
+        run: |
+          pnpm exec tsc -b
+          pnpm exec vite build --mode electron
+          pnpm exec electron-builder --publish=never
+        env:
+          ELECTRON_BUILDER_ALLOW_UNRESOLVED_DEPENDENCIES: "true"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mhclaw-windows-${{ github.sha }}
+          path: |
+            release/*.exe
+            release/*.exe.blockmap
+            release/latest.yml
+          if-no-files-found: error
+          retention-days: 3
+
+      # tag 推送时自动挂到 GitHub Release;普通分支/手动只产 artifact
+      - name: Attach to Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/*.exe
+            release/*.exe.blockmap
+            release/latest.yml
+          generate_release_notes: true

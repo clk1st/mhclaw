@@ -1,0 +1,83 @@
+appId: io.github.clk1st.mhclaw
+productName: mhclaw
+directories:
+  output: release
+# mhclaw:// 协议(deep link 登录回调等)。运行时 app.setAsDefaultProtocolClient
+# 也会注册,但打包时写进 Info.plist / NSIS 里才稳(首次启动前就生效)
+protocols:
+  - name: mhclaw
+    schemes:
+      - mhclaw
+files:
+  - dist
+  - dist-electron
+  - "!node_modules/**/*.{md,map,d.ts}"
+  - "!node_modules/**/{test,tests,__tests__,docs,example,examples}/**"
+  - "!node_modules/**/{README,CHANGELOG,LICENSE}*"
+  # 注意:不要全局排 *.ts —— OpenClaw 生态里相当一部分 plugin(如
+  # @tencent-weixin/openclaw-weixin)直接分发 TypeScript 源,让 OpenClaw
+  # runtime 用 ESM loader 动态加载。排 .ts 会让 plugin 入口消失,Gateway 启动时
+  # 报 "plugin not found"。改成只排 d.ts(类型声明,运行时用不到)。
+  - "!node_modules/**/*.d.ts"
+  # openclaw 是核心运行时依赖,保留其 dist / docs / templates / bundled hooks 等
+  - "node_modules/openclaw/**"
+  # **skills 目录单独白名单** —— OpenClaw 自带 53 个 skill,mhclaw 实际只用 ~12 个。
+  # 打进去的每一个 skill,Gateway 启动时 discoverOpenClawPlugins 和每次 skills.status
+  # 轮询都要全量 fs.stat 扫,Windows NTFS 慢机下累积成数十秒阻塞。
+  # 先用 ! 整体排除,再显式保留白名单(electron-builder 后写覆盖前写)。
+  - "!node_modules/openclaw/skills/**"
+  - "node_modules/openclaw/skills/canvas/**"          # 富输出/画布(底座)
+  - "node_modules/openclaw/skills/skill-creator/**"    # 创建/编辑/审核 skill
+  - "node_modules/openclaw/skills/session-logs/**"     # 会话日志搜索
+  - "node_modules/openclaw/skills/model-usage/**"      # 用量统计
+  - "node_modules/openclaw/skills/healthcheck/**"      # 主机安全检查
+  - "node_modules/openclaw/skills/clawhub/**"          # 技能广场(hub 下载)
+  - "node_modules/openclaw/skills/weather/**"          # 天气
+  - "node_modules/openclaw/skills/github/**"           # GitHub
+  - "node_modules/openclaw/skills/gh-issues/**"        # GitHub Issues
+  - "node_modules/openclaw/skills/tmux/**"             # tmux
+  - "node_modules/openclaw/skills/video-frames/**"     # 视频抽帧
+  - "node_modules/openclaw/skills/summarize/**"        # 总结摘要
+  # OpenClaw plugin 生态通常用 ts-source 分发,显式保留源码目录
+  - "node_modules/@tencent-weixin/**"
+  - "node_modules/@wecom/**"
+  - "node_modules/@largezhou/**"
+asar: true
+asarUnpack:
+  - "node_modules/**"
+# 不给 Electron 重编任何原生模块 ——
+# mhclaw 不直接用原生扩展;OpenClaw 把 @discordjs/opus 拉进来是 Discord voice 栈的
+# transitive dep,我们的桌面客户端根本不跑 Discord voice,rebuild 只会在不同机器上
+# 卡各种 C++ 工具链问题(opus/silk 之类),没收益。
+npmRebuild: false
+mac:
+  category: public.app-category.developer-tools
+  icon: build/icon.icns
+  # 双架构:arm64 给 M 系列(主流),x64 给 Intel Mac(仍有 ~15% 用户)。
+  # 分开打两个 DMG 比 universal 总体积更小,M 用户不用白下 400MB x64 二进制。
+  target:
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+    - target: zip
+      arch:
+        - arm64
+        - x64
+win:
+  target:
+    - nsis
+nsis:
+  # 安装/卸载前自动 kill 所有 mhclaw.exe 及子进程,
+  # 不让用户去任务管理器手动清进程
+  include: build/installer.nsh
+  # one-click 静默安装,装完自动启动;per-user 安装无需管理员
+  oneClick: true
+  runAfterFinish: true
+  perMachine: false
+  # 快捷方式:桌面 + 开始菜单
+  createDesktopShortcut: always
+  createStartMenuShortcut: true
+linux:
+  target:
+    - AppImage

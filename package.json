@@ -1,0 +1,89 @@
+{
+  "name": "mhclaw",
+  "productName": "mhclaw",
+  "version": "0.1.0",
+  "description": "mhclaw - AI 工作台",
+  "private": true,
+  "type": "module",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "dev:electron": "vite --mode electron",
+    "build": "tsc -b && vite build",
+    "build:electron": "tsc -b && vite build --mode electron && electron-builder",
+    "preview": "vite preview",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "postinstall": "bash scripts/patch-electron-icon.sh",
+    "patch-electron-icon": "bash scripts/patch-electron-icon.sh"
+  },
+  "dependencies": {
+    "@fontsource-variable/manrope": "^5.2.8",
+    "@icons-pack/react-simple-icons": "^13.13.0",
+    "@largezhou/ddingtalk": "^2.0.1",
+    "@tanstack/react-query": "^5.99.0",
+    "@tencent-weixin/openclaw-weixin": "^2.1.8",
+    "@wecom/wecom-openclaw-plugin": "^2026.4.8",
+    "adm-zip": "^0.5.17",
+    "chokidar": "^5.0.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "highlight.js": "^11.11.1",
+    "lucide-react": "^1.8.0",
+    "mammoth": "^1.12.0",
+    "openclaw": "2026.5.4",
+    "qrcode": "^1.5.4",
+    "radix-ui": "^1.4.3",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-markdown": "^10.1.0",
+    "react-resizable-panels": "^4.10.0",
+    "react-router-dom": "^7.6.1",
+    "rehype-highlight": "^7.0.2",
+    "remark-gfm": "^4.0.1",
+    "sonner": "^2.0.7",
+    "tailwind-merge": "^3.5.0",
+    "tailwindcss-animate": "^1.0.7",
+    "uuid": "^11.1.0",
+    "ws": "^8.18.0",
+    "xlsx": "^0.18.5",
+    "zustand": "^5.0.5"
+  },
+  "devDependencies": {
+    "@tailwindcss/typography": "^0.5.19",
+    "@tailwindcss/vite": "^4.2.2",
+    "@types/adm-zip": "^0.5.8",
+    "@types/qrcode": "^1.5.6",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@types/uuid": "^10.0.0",
+    "@types/ws": "^8.18.0",
+    "@vitejs/plugin-react": "^4.4.1",
+    "electron": "^35.2.1",
+    "electron-builder": "^26.0.12",
+    "eslint": "^9.27.0",
+    "png-to-ico": "^3.0.1",
+    "tailwindcss": "^4.2.2",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5",
+    "vite-plugin-electron": "^0.29.0",
+    "vite-plugin-electron-renderer": "^0.14.6"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "isbinaryfile": "^5.0.4"
+    },
+    "onlyBuiltDependencies": [
+      "electron",
+      "esbuild",
+      "sharp",
+      "openclaw",
+      "@whiskeysockets/baileys",
+      "koffi",
+      "protobufjs"
+    ]
+  }
+}

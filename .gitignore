@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-electron/
+release/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.*
+
+# Temp files
+_skills_output.json
+_skills_raw.json
+_analyze_skills.cjs
+
+# Claude
+.claude/
+
+# TypeScript build info
+tsconfig.tsbuildinfo
+
+# Generated images (raw)
+Gemini_Generated_Image_*
