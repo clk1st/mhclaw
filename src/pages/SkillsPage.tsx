@@ -79,14 +79,20 @@ export function SkillsPage() {
 
   const skills = data?.skills ?? [];
 
-  // 已安装 = eligible（依赖齐全）的；未安装/缺依赖单独列出
+  // OpenClaw 5.4 marks extensions/<ext>/skills/<name> as bundled=false +
+  // source starts with "openclaw" (e.g. "openclaw-extra"). These are
+  // OpenClaw's own runtime extension skills (e.g. browser-automation
+  // bundled with the browser tool) — not something the user installed.
+  // Treat them as bundled so they show up in the "Built-in" section
+  // instead of the user-facing "Installed" list.
+  const isBundledLike = (s: { bundled: boolean; source?: string }): boolean =>
+    s.bundled || (typeof s.source === "string" && s.source.startsWith("openclaw"));
   const installed = useMemo(
-    // 非 bundled 的都算"用户装的"(不管依赖齐不齐 —— AI 运行时会处理)
-    () => skills.filter((s) => !s.bundled),
+    () => skills.filter((s) => !isBundledLike(s)),
     [skills],
   );
   const bundled = useMemo(
-    () => skills.filter((s) => s.bundled),
+    () => skills.filter((s) => isBundledLike(s)),
     [skills],
   );
 
