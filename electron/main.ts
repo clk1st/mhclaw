@@ -298,6 +298,25 @@ mcpSupervisor.on("health-changed", (evt: { name: string; health?: McpHealth; rem
   }
 });
 
+// Restart the OpenClaw gateway subprocess after MCP registry mutations.
+// OpenClaw's MCP client does NOT subscribe to `tools/list_changed`, so
+// it caches the broker's catalog at startup and never re-lists. Without
+// a gateway restart, removing or editing an MCP server through the UI
+// has no effect — OpenClaw still forwards the stale tool catalog to the
+// LLM. Debounce to coalesce bursts (e.g. import-many-servers).
+let registryRestartTimer: NodeJS.Timeout | null = null;
+mcpRegistry.on("changed", () => {
+  if (registryRestartTimer) clearTimeout(registryRestartTimer);
+  registryRestartTimer = setTimeout(() => {
+    registryRestartTimer = null;
+    if (!gatewayManager.isRunning) return;
+    console.log("[main] MCP registry changed, restarting OpenClaw gateway to refresh catalog");
+    void gatewayManager.restart().catch((err) => {
+      console.error("[main] gateway restart after MCP registry change failed:", err);
+    });
+  }, 300);
+});
+
 // Sync `models.providers.<id>.apiKey` from mhclaw.json to each agent's
 // auth-profiles.json. OpenClaw 5.4+ stopped reading the legacy
 // mhclaw.json apiKey path; without this sync, fresh installs hit
@@ -1243,9 +1262,9 @@ ipcMain.handle(
   "mcpProbe:one",
   async (
     _e,
-    args: { config: McpServerConfigLike; timeoutMs?: number },
+    args: { name?: string; config: McpServerConfigLike; timeoutMs?: number },
   ): Promise<McpProbeResult> => {
-    return probeMcpServer(args.config, args.timeoutMs);
+    return probeMcpServer(args.config, args.timeoutMs, args.name);
   },
 );
 ipcMain.handle(
