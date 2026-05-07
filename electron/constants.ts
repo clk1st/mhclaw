@@ -15,9 +15,10 @@ export const DEFAULT_GATEWAY_PORT = 40789;
 export const DEFAULT_MCP_BROKER_PORT = 40790;
 export const MCP_BROKER_PORT_RANGE = 10;
 
-/** MCP registry / schemas / runs filenames. */
+/** MCP registry / schemas / runs / credentials filenames. */
 export const MCP_REGISTRY_FILENAME = "mcp-registry.json";
 export const MCP_SCHEMAS_FILENAME = "mcp-broker-schemas.json";
+export const MCP_CREDENTIALS_FILENAME = "mcp-credentials.json";
 export const MCP_RUNS_DIRNAME = "mcp-runs";
 
 export function getMcpRegistryPath(): string {
@@ -25,6 +26,9 @@ export function getMcpRegistryPath(): string {
 }
 export function getMcpSchemasPath(): string {
   return path.join(getStateDir(), MCP_SCHEMAS_FILENAME);
+}
+export function getMcpCredentialsPath(): string {
+  return path.join(getStateDir(), MCP_CREDENTIALS_FILENAME);
 }
 export function getMcpRunsDir(): string {
   return path.join(getStateDir(), MCP_RUNS_DIRNAME);

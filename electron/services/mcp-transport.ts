@@ -1,6 +1,13 @@
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
+import {
+  StreamableHTTPClientTransport,
+  type StreamableHTTPClientTransportOptions,
+} from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import {
+  SSEClientTransport,
+  type SSEClientTransportOptions,
+} from "@modelcontextprotocol/sdk/client/sse.js";
+import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { McpServerConfig } from "./mcp-types.js";
 
@@ -29,6 +36,7 @@ export function detectTransport(config: McpServerConfig): DetectedTransport | nu
 
 export function createTransport(
   config: McpServerConfig,
+  authProvider?: OAuthClientProvider,
 ): { transport: Transport; type: DetectedTransport } | null {
   const type = detectTransport(config);
   if (!type) return null;
@@ -78,14 +86,20 @@ export function createTransport(
   const requestInit = headers ? { headers } : undefined;
 
   if (type === "sse") {
+    const opts: SSEClientTransportOptions = {};
+    if (requestInit) opts.requestInit = requestInit;
+    if (authProvider) opts.authProvider = authProvider;
     return {
       type,
-      transport: new SSEClientTransport(parsed, { requestInit }),
+      transport: new SSEClientTransport(parsed, opts),
     };
   }
+  const opts: StreamableHTTPClientTransportOptions = {};
+  if (requestInit) opts.requestInit = requestInit;
+  if (authProvider) opts.authProvider = authProvider;
   return {
     type,
-    transport: new StreamableHTTPClientTransport(parsed, { requestInit }),
+    transport: new StreamableHTTPClientTransport(parsed, opts),
   };
 }
 

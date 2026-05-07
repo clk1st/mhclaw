@@ -138,6 +138,7 @@ export function useMcpServerProbe(
         };
       }
       const res = await probeApi.one({
+        name,
         config: config as unknown as Record<string, unknown>,
         timeoutMs: 15_000,
       });

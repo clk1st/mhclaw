@@ -2,7 +2,10 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
+import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+
+import { MhclawOAuthClientProvider } from "./mcp-oauth.js";
 
 /**
  * Why this file exists
@@ -46,10 +49,24 @@ const DEFAULT_TIMEOUT_MS = 15_000;
 export async function probeMcpServer(
   config: McpServerConfigLike,
   timeoutMs = DEFAULT_TIMEOUT_MS,
+  serverName?: string,
 ): Promise<McpProbeResult> {
   const started = Date.now();
 
-  const transport = createTransport(config);
+  // For OAuth-protected remote servers, the supervisor already completed
+  // the authorization flow and persisted tokens in mcp-credentials.json.
+  // Probe just needs to read those tokens — it does NOT trigger a new
+  // browser auth (placeholder redirectUri is fine; SDK won't call
+  // redirectToAuthorization when a valid token already exists).
+  let authProvider: OAuthClientProvider | undefined;
+  if (serverName) {
+    authProvider = new MhclawOAuthClientProvider(
+      serverName,
+      "http://127.0.0.1:0/oauth/callback",
+    );
+  }
+
+  const transport = createTransport(config, authProvider);
   if (!transport) {
     return {
       ok: false,
@@ -143,7 +160,10 @@ export async function probeMcpServers(
  *  - url + transport=="sse" → SSEClientTransport
  *  - url (any other transport) → StreamableHTTPClientTransport
  */
-function createTransport(config: McpServerConfigLike): Transport | null {
+function createTransport(
+  config: McpServerConfigLike,
+  authProvider?: OAuthClientProvider,
+): Transport | null {
   const stdio = config as {
     command?: string;
     args?: string[];
@@ -182,7 +202,13 @@ function createTransport(config: McpServerConfigLike): Transport | null {
   const headers = http.headers ?? undefined;
   const requestInit = headers ? { headers } : undefined;
   if (http.transport === "sse") {
-    return new SSEClientTransport(parsed, { requestInit });
+    const opts: ConstructorParameters<typeof SSEClientTransport>[1] = {};
+    if (requestInit) opts.requestInit = requestInit;
+    if (authProvider) opts.authProvider = authProvider;
+    return new SSEClientTransport(parsed, opts);
   }
-  return new StreamableHTTPClientTransport(parsed, { requestInit });
+  const opts: ConstructorParameters<typeof StreamableHTTPClientTransport>[1] = {};
+  if (requestInit) opts.requestInit = requestInit;
+  if (authProvider) opts.authProvider = authProvider;
+  return new StreamableHTTPClientTransport(parsed, opts);
 }

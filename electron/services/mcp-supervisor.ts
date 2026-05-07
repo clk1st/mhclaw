@@ -2,14 +2,25 @@ import fs from "node:fs";
 import { EventEmitter } from "node:events";
 import crypto from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type {
+  StreamableHTTPClientTransport,
+} from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 
 import { getMcpSchemasPath, getStateDir } from "../constants.js";
 import {
   createTransport,
   DEFAULT_PROBE_TIMEOUT_MS,
+  detectTransport,
   type DetectedTransport,
 } from "./mcp-transport.js";
+import {
+  MhclawOAuthClientProvider,
+  OAuthCallbackListener,
+  clearCredentials,
+} from "./mcp-oauth.js";
 import type { McpRegistry } from "./mcp-registry.js";
 import type {
   McpHealth,
@@ -160,6 +171,9 @@ export class McpSupervisor extends EventEmitter {
       this.cancelRetry(name);
       this.health.delete(name);
       this.lastKnownGood.delete(name);
+      // OAuth credentials are tied to the server; remove on deletion so
+      // a future re-add starts fresh and doesn't reuse stale tokens.
+      clearCredentials(name);
       this.persistSchemas();
       this.emit("health-changed", { name, removed: true });
       return;
@@ -253,7 +267,57 @@ export class McpSupervisor extends EventEmitter {
     const existing = this.clients.get(name);
     if (existing) return existing.client;
 
-    const created = createTransport(cfg);
+    const detected = detectTransport(cfg);
+    if (!detected) {
+      throw new Error(
+        `MCP server "${name}" config has neither command nor a valid url`,
+      );
+    }
+
+    // OAuth flow only applies to remote (sse / streamable-http) transports.
+    // Stdio servers are launched as a subprocess and don't speak HTTP,
+    // so PKCE is not relevant.
+    const useOAuth = detected !== "stdio";
+    let listener: OAuthCallbackListener | null = null;
+    let authProvider: MhclawOAuthClientProvider | undefined;
+
+    if (useOAuth) {
+      listener = new OAuthCallbackListener();
+      const { redirectUri } = await listener.start();
+      authProvider = new MhclawOAuthClientProvider(name, redirectUri);
+    }
+
+    try {
+      const session = await this.attemptConnect(
+        name,
+        cfg,
+        authProvider,
+        listener,
+      );
+      this.clients.set(name, session);
+      return session.client;
+    } finally {
+      // Listener no longer needed once connection is established
+      // (or definitively failed). For stdio it was never started.
+      listener?.dispose();
+    }
+  }
+
+  /**
+   * One connect attempt. If the server demands OAuth and we have no token,
+   * the SDK throws UnauthorizedError after invoking
+   * `provider.redirectToAuthorization()`. We then await the loopback
+   * listener for the auth code, call `transport.finishAuth(code)` to
+   * exchange it for tokens via PKCE, and retry the connection once with
+   * a fresh transport.
+   */
+  private async attemptConnect(
+    name: string,
+    cfg: McpServerConfig,
+    authProvider: MhclawOAuthClientProvider | undefined,
+    listener: OAuthCallbackListener | null,
+  ): Promise<ClientSession> {
+    const created = createTransport(cfg, authProvider);
     if (!created) {
       throw new Error(
         `MCP server "${name}" config has neither command nor a valid url`,
@@ -264,7 +328,52 @@ export class McpSupervisor extends EventEmitter {
       { name: "mhclaw-mcp-broker", version: "1.0.0" },
       { capabilities: {} },
     );
+    this.wireTransportEvents(name, transport);
 
+    const timeoutMs = cfg.connectionTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
+    try {
+      await this.connectWithTimeout(client, transport, timeoutMs);
+      return { client, transport, type };
+    } catch (err) {
+      if (!(err instanceof UnauthorizedError) || !authProvider || !listener) {
+        throw err;
+      }
+
+      // SDK already invoked provider.redirectToAuthorization() (which opens
+      // the user's browser). The user is now authorizing; we wait for the
+      // auth code to arrive on the loopback listener.
+      console.log(`[McpSupervisor] ${name}: OAuth flow started, waiting for callback`);
+      const code = await listener.waitForCode();
+
+      // Exchange code + PKCE verifier for tokens via the (still-alive)
+      // first transport. After this, the provider has saved tokens to disk.
+      const httpTransport = transport as
+        | StreamableHTTPClientTransport
+        | SSEClientTransport;
+      await httpTransport.finishAuth(code);
+      await this.safeCloseTransport(transport);
+
+      // Retry with a fresh transport that will pick up the saved bearer
+      // token from the provider on connect.
+      const retryCreated = createTransport(cfg, authProvider);
+      if (!retryCreated) {
+        throw new Error(`MCP server "${name}" failed to recreate transport after OAuth`);
+      }
+      const retryClient = new Client(
+        { name: "mhclaw-mcp-broker", version: "1.0.0" },
+        { capabilities: {} },
+      );
+      this.wireTransportEvents(name, retryCreated.transport);
+      await this.connectWithTimeout(retryClient, retryCreated.transport, timeoutMs);
+      return {
+        client: retryClient,
+        transport: retryCreated.transport,
+        type: retryCreated.type,
+      };
+    }
+  }
+
+  private wireTransportEvents(name: string, transport: Transport): void {
     transport.onerror = (err) => {
       console.warn(`[McpSupervisor] ${name} transport error:`, err);
       void this.handleTransportFailure(name, err);
@@ -272,16 +381,20 @@ export class McpSupervisor extends EventEmitter {
     transport.onclose = () => {
       this.clients.delete(name);
     };
+  }
 
-    const timeoutMs = cfg.connectionTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
+  private async connectWithTimeout(
+    client: Client,
+    transport: Transport,
+    timeoutMs: number,
+  ): Promise<void> {
     let timer: NodeJS.Timeout | null = null;
     try {
       await Promise.race([
         client.connect(transport),
         new Promise<never>((_, reject) => {
           timer = setTimeout(
-            () =>
-              reject(new Error(`MCP connect timeout after ${timeoutMs}ms`)),
+            () => reject(new Error(`MCP connect timeout after ${timeoutMs}ms`)),
             timeoutMs,
           );
         }),
@@ -289,9 +402,14 @@ export class McpSupervisor extends EventEmitter {
     } finally {
       if (timer) clearTimeout(timer);
     }
+  }
 
-    this.clients.set(name, { client, transport, type });
-    return client;
+  private async safeCloseTransport(transport: Transport): Promise<void> {
+    try {
+      await transport.close();
+    } catch {
+      // swallow
+    }
   }
 
   private async handleTransportFailure(

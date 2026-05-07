@@ -333,6 +333,7 @@ contextBridge.exposeInMainWorld("cjtClaw", {
   /** MCP probe (main process runs its own MCP client; bypasses gateway). */
   mcpProbe: {
     one: (args: {
+      name?: string;
       config: Record<string, unknown>;
       timeoutMs?: number;
     }) =>

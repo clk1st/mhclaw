@@ -106,6 +106,7 @@ declare global {
       };
       mcpProbe: {
         one: (args: {
+          name?: string;
           config: Record<string, unknown>;
           timeoutMs?: number;
         }) => Promise<{
