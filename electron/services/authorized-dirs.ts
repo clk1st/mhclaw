@@ -127,6 +127,31 @@ function getBuiltInAuthorizedDirs(): string[] {
   return builtInCache;
 }
 
+/**
+ * Known task folders read from session-task.json. The LLM emits
+ * [embed url=mhclaw-authorized://fs/<encoded-abs-path>] pointing to
+ * files inside ~/mhclaw/<ts> (folders that mhclaw itself created via
+ * createBlankTask). Those folders are NOT in the state-dir built-in
+ * whitelist and the user never explicitly authorized them, so without
+ * this implicit allow the "Artifacts" tab clicks fail with
+ * "not authorized".
+ *
+ * Read session-task.json directly (avoid importing task-folder to
+ * prevent a circular dependency). These paths are app-owned, default
+ * allow is reasonable; UI never shows them and removeAuthorizedDir
+ * cannot touch them.
+ */
+function getKnownTaskFolders(): string[] {
+  try {
+    const p = path.join(getStateDir(), "session-task.json");
+    if (!fs.existsSync(p)) return [];
+    const map = JSON.parse(fs.readFileSync(p, "utf-8")) as Record<string, string>;
+    return Array.from(new Set(Object.values(map))).filter((v) => typeof v === "string");
+  } catch {
+    return [];
+  }
+}
+
 /** Is `target` inside any authorized directory? (strict prefix + realpath) */
 export function isAuthorized(target: string): boolean {
   let real: string;
@@ -139,6 +164,18 @@ export function isAuthorized(target: string): boolean {
   for (const base of getBuiltInAuthorizedDirs()) {
     const baseWithSep = base.endsWith(path.sep) ? base : base + path.sep;
     if (real === base || real.startsWith(baseWithSep)) return true;
+  }
+  // Task folders mhclaw itself created via createBlankTask
+  // (where the LLM writes artifacts).
+  for (const tf of getKnownTaskFolders()) {
+    let realTf: string;
+    try {
+      realTf = fs.realpathSync(tf);
+    } catch {
+      realTf = path.resolve(tf);
+    }
+    const baseWithSep = realTf.endsWith(path.sep) ? realTf : realTf + path.sep;
+    if (real === realTf || real.startsWith(baseWithSep)) return true;
   }
   // Then user-authorized directories.
   const list = load();
