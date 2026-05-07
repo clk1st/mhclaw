@@ -186,6 +186,23 @@ export function bindSessionToFolder(sessionKey: string, taskPath: string): void 
   if (!sessionKey || !taskPath) return;
   const map = loadSessionTaskMap();
   map[sessionKey] = taskPath;
+
+  // OpenClaw 5.4 hardcodes the agent default mainSessionKey as
+  // `agent:<agentId>:main`. The LLM agent uses this key when emitting
+  // [embed url=...://fs/<sessionKey>/<file>] URLs — but mhclaw's own
+  // chat sessionKey is `agent:<id>:session-<ts>`. Without binding the
+  // alias, protocol.handle / preview-probe receive `agent:main:main`
+  // and fail to resolve a task folder, so the chat shows "preview
+  // failed" even though the file exists.
+  //
+  // Bind the alias to the same taskPath. In multi-chat scenarios the
+  // alias is overwritten by the most recent bind — best-effort, but
+  // strictly better than every preview failing.
+  const aliasMatch = /^agent:([^:]+):session-/.exec(sessionKey);
+  if (aliasMatch) {
+    map[`agent:${aliasMatch[1]}:main`] = taskPath;
+  }
+
   saveSessionTaskMap(map);
 
   // Mirror onto task.json.sessionKey.
