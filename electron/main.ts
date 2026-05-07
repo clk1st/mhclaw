@@ -887,6 +887,28 @@ ipcMain.handle("skills:getMd", async (_event, name: string) => {
     // Doesn't matter — workspace / managed lookups can still find it.
   }
 
+  // OpenClaw 5.4 ships "extension skills" (skills bundled with runtime
+  // extensions like browser/canvas) under
+  // dist/extensions/<ext>/skills/<name>/SKILL.md, NOT under the main
+  // skills/ directory. Walk dist/extensions at startup and add each
+  // ext's skills root to the candidate list. Without this, opening
+  // browser-automation in the Skill detail dialog throws
+  // "SKILL.md not found".
+  const extensionRoots: string[] = [];
+  if (bundledRoot) {
+    const distExtRoot = path.join(path.dirname(bundledRoot), "dist", "extensions");
+    if (fs.existsSync(distExtRoot)) {
+      try {
+        for (const ext of fs.readdirSync(distExtRoot)) {
+          const extSkills = path.join(distExtRoot, ext, "skills");
+          if (fs.existsSync(extSkills)) extensionRoots.push(extSkills);
+        }
+      } catch {
+        // best-effort
+      }
+    }
+  }
+
   const candidates: Array<{ source: string; file: string }> = [
     { source: "workspace", file: path.join(getSkillsDir(), name, "SKILL.md") },
     {
@@ -896,6 +918,10 @@ ipcMain.handle("skills:getMd", async (_event, name: string) => {
     ...(bundledRoot
       ? [{ source: "bundled", file: path.join(bundledRoot, name, "SKILL.md") }]
       : []),
+    ...extensionRoots.map((root) => ({
+      source: "openclaw-extra",
+      file: path.join(root, name, "SKILL.md"),
+    })),
   ];
 
   for (const c of candidates) {
@@ -919,6 +945,7 @@ ipcMain.handle("skills:getMd", async (_event, name: string) => {
     { source: "workspace", dir: getSkillsDir() },
     { source: "managed", dir: path.join(getStateDir(), "skills") },
     ...(bundledRoot ? [{ source: "bundled", dir: bundledRoot }] : []),
+    ...extensionRoots.map((dir) => ({ source: "openclaw-extra", dir })),
   ];
   const target = name.trim();
   for (const { source, dir } of scanRoots) {
