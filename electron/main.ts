@@ -58,6 +58,8 @@ import {
 } from "./services/mcp-registry.js";
 import { McpSupervisor } from "./services/mcp-supervisor.js";
 import { McpBroker } from "./services/mcp-broker.js";
+import { syncAgentAuthProfiles } from "./services/agent-auth-sync.js";
+import chokidar from "chokidar";
 import type {
   McpServerConfig,
   McpHealth,
@@ -294,6 +296,25 @@ mcpSupervisor.on("health-changed", (evt: { name: string; health?: McpHealth; rem
       win.webContents.send("mcp:health-changed", evt);
     }
   }
+});
+
+// Sync `models.providers.<id>.apiKey` from mhclaw.json to each agent's
+// auth-profiles.json. OpenClaw 5.4+ stopped reading the legacy
+// mhclaw.json apiKey path; without this sync, fresh installs hit
+// "No API key found for provider <id>" on first chat.
+// Runs once at startup (covers existing installs upgrading) plus a
+// chokidar watcher on mhclaw.json (covers users who configure a
+// model after launch via Setup Wizard).
+syncAgentAuthProfiles();
+const authSyncWatcher = chokidar.watch(getConfigPath(), {
+  ignoreInitial: true,
+  awaitWriteFinish: { stabilityThreshold: 200, pollInterval: 50 },
+});
+authSyncWatcher.on("change", () => {
+  syncAgentAuthProfiles();
+});
+authSyncWatcher.on("add", () => {
+  syncAgentAuthProfiles();
 });
 
 // Register custom protocol schemes (must happen before app.ready).
