@@ -277,6 +277,8 @@ function AddModelForm({
     setSelectedModel,
     customBaseUrl,
     setCustomBaseUrl,
+    customApiFormat,
+    setCustomApiFormat,
     customModelId,
     setCustomModelId,
     error,
@@ -285,8 +287,8 @@ function AddModelForm({
   const [dupWarning, setDupWarning] = useState<string | null>(null);
   const [customReasoning, setCustomReasoning] = useState(false);
   const [customImageInput, setCustomImageInput] = useState(false);
-  const [customContextWindow, setCustomContextWindow] = useState(128000);
-  const [customMaxTokens, setCustomMaxTokens] = useState(4096);
+  const [customContextWindow, setCustomContextWindow] = useState(200000);
+  const [customMaxTokens, setCustomMaxTokens] = useState(32000);
 
   const isCustom = selectedProvider?.id === "custom";
   const isOllama = selectedProvider?.id === "ollama";
@@ -330,7 +332,7 @@ function AddModelForm({
 
     const providerBlock: Record<string, unknown> = {
       baseUrl,
-      api: isCustom ? "openai-completions" : selectedProvider.apiType,
+      api: isCustom ? customApiFormat : selectedProvider.apiType,
     };
     if (!isOllama) providerBlock.apiKey = apiKey.trim();
 
@@ -405,11 +407,52 @@ function AddModelForm({
           )}
 
           {isCustom && (
+            <Field label="协议格式">
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setCustomApiFormat("openai-completions")}
+                  className={cn(
+                    "rounded-md border border-border bg-card px-3 py-2 text-left text-sm transition",
+                    customApiFormat === "openai-completions"
+                      ? "border-primary bg-primary/5"
+                      : "hover:border-foreground/20 hover:bg-accent",
+                  )}
+                >
+                  <div className="font-medium">OpenAI 兼容</div>
+                  <div className="text-xs text-muted-foreground">
+                    /v1/chat/completions · 大多数中转站、国产模型
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCustomApiFormat("anthropic-messages")}
+                  className={cn(
+                    "rounded-md border border-border bg-card px-3 py-2 text-left text-sm transition",
+                    customApiFormat === "anthropic-messages"
+                      ? "border-primary bg-primary/5"
+                      : "hover:border-foreground/20 hover:bg-accent",
+                  )}
+                >
+                  <div className="font-medium">Anthropic 原生</div>
+                  <div className="text-xs text-muted-foreground">
+                    /v1/messages · Claude / Claude Code 走的协议
+                  </div>
+                </button>
+              </div>
+            </Field>
+          )}
+
+          {isCustom && (
             <Field label="API 地址">
               <Input
                 value={customBaseUrl}
                 onChange={(e) => setCustomBaseUrl(e.target.value)}
-                placeholder="https://your-api.example.com/v1"
+                placeholder={
+                  customApiFormat === "anthropic-messages"
+                    ? "https://api.anthropic.com（一般不带 /v1）"
+                    : "https://your-api.example.com/v1"
+                }
               />
             </Field>
           )}
@@ -459,18 +502,32 @@ function AddModelForm({
               <div className="grid grid-cols-2 gap-3">
                 <Field label="上下文窗口（tokens）">
                   <Input
-                    type="number"
-                    min={1024}
-                    value={customContextWindow}
-                    onChange={(e) => setCustomContextWindow(Math.max(1024, Number(e.target.value)))}
+                    type="text"
+                    inputMode="numeric"
+                    value={customContextWindow === 0 ? "" : String(customContextWindow)}
+                    onChange={(e) => {
+                      const raw = e.target.value.replace(/\D/g, "");
+                      setCustomContextWindow(raw === "" ? 0 : Number(raw));
+                    }}
+                    onBlur={() => {
+                      if (customContextWindow < 1024) setCustomContextWindow(200000);
+                    }}
+                    placeholder="200000"
                   />
                 </Field>
                 <Field label="最大输出（tokens）">
                   <Input
-                    type="number"
-                    min={256}
-                    value={customMaxTokens}
-                    onChange={(e) => setCustomMaxTokens(Math.max(256, Number(e.target.value)))}
+                    type="text"
+                    inputMode="numeric"
+                    value={customMaxTokens === 0 ? "" : String(customMaxTokens)}
+                    onChange={(e) => {
+                      const raw = e.target.value.replace(/\D/g, "");
+                      setCustomMaxTokens(raw === "" ? 0 : Number(raw));
+                    }}
+                    onBlur={() => {
+                      if (customMaxTokens < 256) setCustomMaxTokens(32000);
+                    }}
+                    placeholder="32000"
                   />
                 </Field>
               </div>

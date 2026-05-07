@@ -131,6 +131,8 @@ interface SetupState {
   selectedModelId: string;
   /** 自定义 provider 的 baseUrl */
   customBaseUrl: string;
+  /** 自定义 provider 的协议格式（仅 isCustom 时生效） */
+  customApiFormat: "openai-completions" | "anthropic-messages";
   /** 自定义模型 ID */
   customModelId: string;
   /** config.get 返回的 hash（config.patch 需要） */
@@ -154,6 +156,8 @@ interface SetupState {
   setSelectedModel: (modelId: string) => void;
   /** 设置自定义 URL */
   setCustomBaseUrl: (url: string) => void;
+  /** 设置自定义协议格式 */
+  setCustomApiFormat: (format: "openai-completions" | "anthropic-messages") => void;
   /** 设置自定义模型 ID */
   setCustomModelId: (id: string) => void;
   /** 提交模型配置到 Gateway */
@@ -170,6 +174,7 @@ export const useSetupStore = create<SetupState>((set) => ({
   apiKey: "",
   selectedModelId: "",
   customBaseUrl: "",
+  customApiFormat: "openai-completions",
   customModelId: "",
   configHash: null,
   error: null,
@@ -233,6 +238,7 @@ export const useSetupStore = create<SetupState>((set) => ({
   setApiKey: (key) => set({ apiKey: key }),
   setSelectedModel: (modelId) => set({ selectedModelId: modelId }),
   setCustomBaseUrl: (url) => set({ customBaseUrl: url }),
+  setCustomApiFormat: (format) => set({ customApiFormat: format }),
   setCustomModelId: (id) => set({ customModelId: id }),
 
   submitModelConfig: async (client) => {
