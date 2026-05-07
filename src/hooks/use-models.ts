@@ -158,7 +158,7 @@ export function useAddModel() {
       const dedup = existingModels.filter((m) => m.id !== params.model.id);
       dedup.push(params.model);
 
-      // partial patch:只发要改的字段,apiKey 等由 providerBlock 传入(用户新填的真实值)
+      // Partial patch: only send fields we mean to change.
       const providerPatches: Record<string, Partial<ProviderBlock>> = {};
       for (const [providerId, provider] of Object.entries(providers)) {
         if (providerId === params.providerId || !Array.isArray(provider.models)) continue;
@@ -167,10 +167,17 @@ export function useAddModel() {
           providerPatches[providerId] = { models };
         }
       }
-      providerPatches[params.providerId] = {
-        ...params.providerBlock,
-        models: dedup,
-      };
+      // Existing provider: only append the model — DO NOT overwrite
+      // baseUrl / apiKey / api with the new providerBlock. The Setup
+      // Wizard's "Custom (OpenAI compatible)" preset uses a fixed
+      // providerId ("custom") for every add, so blindly spreading
+      // params.providerBlock would silently replace the previously
+      // configured baseUrl/apiKey when the user adds a second custom
+      // model with a different upstream.
+      // New provider: write the full block.
+      providerPatches[params.providerId] = existing
+        ? { models: dedup }
+        : { ...params.providerBlock, models: dedup };
 
       const patch: Record<string, unknown> = {
         models: {
